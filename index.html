@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>QR & Barcode Scanner</title>
+<script src="https://unpkg.com/html5-qrcode"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+  import { getDatabase, ref, push, get } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyCJuN5dtsVudZ8Nk_t4q0-ukoff3TGqbow",
+    authDomain: "qr-scanner-48466.firebaseapp.com",
+    databaseURL: "https://qr-scanner-48466-default-rtdb.firebaseio.com",
+    projectId: "qr-scanner-48466",
+    storageBucket: "qr-scanner-48466.firebasestorage.app",
+    messagingSenderId: "1080722195269",
+    appId: "1:1080722195269:web:9240a4d75e262b3241b42c",
+    measurementId: "G-7JESXECVRE"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const db = getDatabase(app);
+  const scansRef = ref(db, "scans");
+
+  const html5QrCode = new Html5Qrcode("reader");
+  let data = [];
+  let duplicate = new Set();
+  let toastTimeout = null;
+
+  function showToast(msg, type) {
+    const toast = document.getElementById("toast");
+    toast.textContent = msg;
+    toast.className = "toast show " + type;
+    if (toastTimeout) clearTimeout(toastTimeout);
+    toastTimeout = setTimeout(() => {
+      toast.className = "toast";
+    }, 3000);
+  }
+
+  function parseQR(text) {
+    const fields = {
+      Quantity: "", RemQuantity: "", ItemCode: "",
+      Desc: "", Lot: "", ManualLot: "", Raw: text
+    };
+    const lines = text.split("\n");
+    lines.forEach(line => {
+      const colonIdx = line.indexOf(":");
+      if (colonIdx === -1) return;
+      const key = line.substring(0, colonIdx).trim().toLowerCase().replace(/[\s.]/g, "");
+      const val = line.substring(colonIdx + 1).trim();
+      if (key === "quantity")           fields.Quantity = val;
+      else if (key === "remquantity")   fields.RemQuantity = val;
+      else if (key === "itemcode")      fields.ItemCode = val;
+      else if (key === "desc")          fields.Desc = val;
+      else if (key === "lot")           fields.Lot = val;
+      else if (key === "manuallot")     fields.ManualLot = val;
+    });
+    return fields;
+  }
+
+  function dupKey(f) {
+    return (f.ItemCode + "|" + f.Lot).toLowerCase();
+  }
+
+  function addRowToTable(no, f, time) {
+    let tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${no}</td>
+      <td>${f.Quantity}</td>
+      <td>${f.RemQuantity}</td>
+      <td>${f.ItemCode}</td>
+      <td>${f.Desc}</td>
+      <td>${f.Lot}</td>
+      <td>${f.ManualLot}</td>
+      <td>${time}</td>
+    `;
+    document.querySelector("#tbl tbody").appendChild(tr);
+  }
+
+  function startCamera() {
+    html5QrCode.start(
+      { facingMode: "environment" },
+      { fps: 10, qrbox: 250 },
+      scanSuccess
+    );
+  }
+
+  function stopCamera() {
+    html5QrCode.stop();
+  }
+
+  function scanSuccess(text) {
+    const fields = parseQR(text);
+    const key = dupKey(fields);
+
+    if (duplicate.has(key)) {
+      // ✅ Show duplicate warning
+      if (navigator.vibrate) navigator.vibrate([100, 50, 100]);
+      showToast("⚠️ Already Added! Lot: " + fields.Lot, "warn");
+      return;
+    }
+    duplicate.add(key);
+
+    const time = new Date().toLocaleString();
+    const no = data.length + 1;
+
+    const row = {
+      No: no,
+      Quantity: fields.Quantity,
+      "Rem.Quantity": fields.RemQuantity,
+      "Item Code": fields.ItemCode,
+      Desc: fields.Desc,
+      Lot: fields.Lot,
+      "Manual Lot": fields.ManualLot,
+      DateTime: time
+    };
+    data.push(row);
+
+    push(scansRef, {
+      quantity: fields.Quantity,
+      remQuantity: fields.RemQuantity,
+      itemCode: fields.ItemCode,
+      desc: fields.Desc,
+      lot: fields.Lot,
+      manualLot: fields.ManualLot,
+      raw: text,
+      time: new Date().toISOString()
+    });
+
+    addRowToTable(no, fields, time);
+    if (navigator.vibrate) navigator.vibrate(150);
+    showToast("✅ Saved! Lot: " + fields.Lot, "success");
+  }
+
+  function exportExcel() {
+    let ws = XLSX.utils.json_to_sheet(data);
+    let wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Scans");
+    XLSX.writeFile(wb, "ScannedData.xlsx");
+  }
+
+  async function loadFromFirebase() {
+    const snapshot = await get(scansRef);
+    if (!snapshot.exists()) return;
+    snapshot.forEach((child) => {
+      const d = child.val();
+      const f = {
+        Quantity: d.quantity || "",
+        RemQuantity: d.remQuantity || "",
+        ItemCode: d.itemCode || "",
+        Desc: d.desc || "",
+        Lot: d.lot || "",
+        ManualLot: d.manualLot || ""
+      };
+      const key = dupKey(f);
+      if (duplicate.has(key)) return;
+      duplicate.add(key);
+      const time = new Date(d.time).toLocaleString();
+      const no = data.length + 1;
+      data.push({
+        No: no,
+        Quantity: f.Quantity,
+        "Rem.Quantity": f.RemQuantity,
+        "Item Code": f.ItemCode,
+        Desc: f.Desc,
+        Lot: f.Lot,
+        "Manual Lot": f.ManualLot,
+        DateTime: time
+      });
+      addRowToTable(no, f, time);
+    });
+  }
+
+  window.addEventListener("DOMContentLoaded", () => {
+    document.getElementById("start").onclick = startCamera;
+    document.getElementById("stop").onclick = stopCamera;
+    document.getElementById("export").onclick = exportExcel;
+    loadFromFirebase();
+  });
+</script>
+<style>
+* { box-sizing: border-box; }
+body { font-family: Arial, sans-serif; background: #f2f2f2; padding: 15px; margin: 0; }
+h2 { text-align: center; }
+#reader { width: 100%; max-width: 450px; margin: auto; border: 2px solid #2196F3; border-radius: 8px; }
+.buttons { margin: 15px 0; display: flex; gap: 10px; }
+button { flex: 1; padding: 12px; border: none; border-radius: 5px; color: white; font-size: 16px; cursor: pointer; }
+#start { background: #28a745; }
+#stop { background: #dc3545; }
+#export { background: #007bff; }
+.tbl-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; background: white; min-width: 800px; }
+th, td { border: 1px solid #ccc; padding: 8px; text-align: center; font-size: 13px; }
+th { background: #007bff; color: white; }
+
+/* Toast */
+.toast {
+  visibility: hidden;
+  min-width: 280px;
+  max-width: 90vw;
+  text-align: center;
+  border-radius: 10px;
+  padding: 14px 20px;
+  position: fixed;
+  top: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 9999;
+  font-size: 15px;
+  font-weight: bold;
+  opacity: 0;
+  transition: opacity 0.4s ease;
+  pointer-events: none;
+}
+.toast.show {
+  visibility: visible;
+  opacity: 1;
+}
+.toast.success {
+  background: #28a745;
+  color: white;
+}
+.toast.warn {
+  background: #ff5722;
+  color: white;
+  animation: shake 0.4s ease;
+}
+@keyframes shake {
+  0%   { transform: translateX(-50%) translateX(0); }
+  25%  { transform: translateX(-50%) translateX(-8px); }
+  50%  { transform: translateX(-50%) translateX(8px); }
+  75%  { transform: translateX(-50%) translateX(-8px); }
+  100% { transform: translateX(-50%) translateX(0); }
+}
+</style>
+</head>
+<body>
+
+<!-- Toast Notification -->
+<div id="toast" class="toast"></div>
+
+<h2>QR & Barcode Scanner</h2>
+<div id="reader"></div>
+<div class="buttons">
+  <button id="start">Open Camera</button>
+  <button id="stop">Stop</button>
+  <button id="export">Export Excel</button>
+</div>
+<div class="tbl-wrap">
+  <table id="tbl">
+    <thead>
+      <tr>
+        <th>No</th>
+        <th>Quantity</th>
+        <th>Rem.Quantity</th>
+        <th>Item Code</th>
+        <th>Desc</th>
+        <th>Lot</th>
+        <th>Manual Lot</th>
+        <th>Date Time</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+</div>
+</body>
+</html>
