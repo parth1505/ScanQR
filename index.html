@@ -8,7 +8,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script type="module">
   import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-  import { getDatabase, ref, push, get } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+  import { getDatabase, ref, push, get, remove } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
 
   const firebaseConfig = {
     apiKey: "AIzaSyCJuN5dtsVudZ8Nk_t4q0-ukoff3TGqbow",
@@ -22,249 +22,776 @@
   };
 
   const app = initializeApp(firebaseConfig);
-  const db = getDatabase(app);
-  const scansRef = ref(db, "scans");
+  const db  = getDatabase(app);
+
+  const scansRef       = ref(db, "scans");
+  const locationsRef   = ref(db, "locations");
+  const departmentsRef = ref(db, "departments");
+  const employeesRef   = ref(db, "employees");
+
+  let data = [], duplicate = new Map(), pendingFields = null;
+  let globalLocation = "", globalDepartment = "", globalUser = "", globalEmpId = "";
+  let locationsList = [], departmentsList = [], employeesList = [];
 
   const html5QrCode = new Html5Qrcode("reader");
-  let data = [];
-  let duplicate = new Set();
-  let toastTimeout = null;
 
-  function showToast(msg, type) {
-    const toast = document.getElementById("toast");
-    toast.textContent = msg;
-    toast.className = "toast show " + type;
-    if (toastTimeout) clearTimeout(toastTimeout);
-    toastTimeout = setTimeout(() => {
-      toast.className = "toast";
-    }, 3000);
+  // ── Loader helpers ────────────────────────────────────────────
+  function showLoader() { document.getElementById("loader-overlay").style.display = "flex"; }
+  function hideLoader() { document.getElementById("loader-overlay").style.display = "none"; }
+
+  // ── Screen helper ─────────────────────────────────────────────
+  function showScreen(id) {
+    ["screen-login","screen-admin","screen-session","screen-main"]
+      .forEach(s => {
+        const el = document.getElementById(s);
+        el.style.display = "none";
+      });
+    const target = document.getElementById(id);
+    target.style.display = (id === "screen-admin" || id === "screen-main") ? "block" : "flex";
   }
 
-  function parseQR(text) {
-    const fields = {
-      Quantity: "", RemQuantity: "", ItemCode: "",
-      Desc: "", Lot: "", ManualLot: "", Raw: text
-    };
-    const lines = text.split("\n");
-    lines.forEach(line => {
-      const colonIdx = line.indexOf(":");
-      if (colonIdx === -1) return;
-      const key = line.substring(0, colonIdx).trim().toLowerCase().replace(/[\s.]/g, "");
-      const val = line.substring(colonIdx + 1).trim();
-      if (key === "quantity")           fields.Quantity = val;
-      else if (key === "remquantity")   fields.RemQuantity = val;
-      else if (key === "itemcode")      fields.ItemCode = val;
-      else if (key === "desc")          fields.Desc = val;
-      else if (key === "lot")           fields.Lot = val;
-      else if (key === "manuallot")     fields.ManualLot = val;
+  // ── Load ALL master data fresh from Firebase ──────────────────
+  async function loadMasterData() {
+    locationsList   = [];
+    departmentsList = [];
+    employeesList   = [];
+
+    const [locSnap, deptSnap, empSnap] = await Promise.all([
+      get(locationsRef),
+      get(departmentsRef),
+      get(employeesRef)
+    ]);
+
+    // THE FIX: Added { } around push to prevent Firebase forEach from exiting early
+    if (locSnap.exists()) {
+      locSnap.forEach(c => { locationsList.push({ key: c.key, name: c.val().name }); });
+    }
+    if (deptSnap.exists()) {
+      deptSnap.forEach(c => { departmentsList.push({ key: c.key, name: c.val().name }); });
+    }
+    if (empSnap.exists()) {
+      empSnap.forEach(c => { employeesList.push({ key: c.key, ...c.val() }); });
+    }
+  }
+
+  // ═══ ADMIN LOGIN ═════════════════════════════════════════════
+  async function doLogin() {
+    const u = document.getElementById("login-user").value.trim();
+    const p = document.getElementById("login-pass").value;
+    document.getElementById("login-err").textContent = "";
+    if (u === "Admin@QRscan.com" && p === "Admin@123") {
+      showLoader();
+      await loadMasterData();
+      renderAll();
+      hideLoader();
+      showScreen("screen-admin");
+      showTab("locations");
+    } else {
+      document.getElementById("login-err").textContent = "❌ Invalid username or password.";
+    }
+  }
+
+  // ═══ ADMIN RENDER ════════════════════════════════════════════
+  function renderAll() {
+    renderLocations();
+    renderDepartments();
+    renderEmployees();
+    refreshEmpDeptDropdown();
+  }
+
+  function renderLocations() {
+    const list = document.getElementById("admin-loc-list");
+    list.innerHTML = "";
+    if (locationsList.length === 0) {
+      list.innerHTML = '<p style="color:#aaa;font-size:13px;margin:8px 0">No locations added yet.</p>';
+      return;
+    }
+    locationsList.forEach(l => {
+      const div = document.createElement("div");
+      div.className = "admin-item";
+      div.innerHTML = `<span>📍 ${l.name}</span>
+        <button class="del-btn" onclick="deleteLocation('${l.key}')">🗑 Delete</button>`;
+      list.appendChild(div);
     });
-    return fields;
   }
 
-  function dupKey(f) {
-    return (f.ItemCode + "|" + f.Lot).toLowerCase();
+  function renderDepartments() {
+    const list = document.getElementById("admin-dept-list");
+    list.innerHTML = "";
+    if (departmentsList.length === 0) {
+      list.innerHTML = '<p style="color:#aaa;font-size:13px;margin:8px 0">No departments added yet.</p>';
+      return;
+    }
+    departmentsList.forEach(d => {
+      const div = document.createElement("div");
+      div.className = "admin-item";
+      div.innerHTML = `<span>🏢 ${d.name}</span>
+        <button class="del-btn" onclick="deleteDepartment('${d.key}')">🗑 Delete</button>`;
+      list.appendChild(div);
+    });
   }
 
-  function addRowToTable(no, f, time) {
-    let tr = document.createElement("tr");
-    tr.innerHTML = `
-      <td>${no}</td>
-      <td>${f.Quantity}</td>
-      <td>${f.RemQuantity}</td>
-      <td>${f.ItemCode}</td>
-      <td>${f.Desc}</td>
-      <td>${f.Lot}</td>
-      <td>${f.ManualLot}</td>
-      <td>${time}</td>
-    `;
-    document.querySelector("#tbl tbody").appendChild(tr);
+  function renderEmployees() {
+    const list = document.getElementById("admin-emp-list");
+    list.innerHTML = "";
+    if (employeesList.length === 0) {
+      list.innerHTML = '<p style="color:#aaa;font-size:13px;margin:8px 0">No employees added yet.</p>';
+      return;
+    }
+    employeesList.forEach(e => {
+      const div = document.createElement("div");
+      div.className = "admin-item";
+      div.innerHTML = `
+        <span>👤 <b>${e.name}</b> &nbsp;|&nbsp; ID: <b>${e.empId}</b> &nbsp;|&nbsp; 🏢 ${e.department}</span>
+        <button class="del-btn" onclick="deleteEmployee('${e.key}')">🗑 Delete</button>`;
+      list.appendChild(div);
+    });
   }
+
+  function refreshEmpDeptDropdown() {
+    const sel = document.getElementById("new-emp-dept");
+    const cur = sel.value;
+    sel.innerHTML = '<option value="">-- Department --</option>';
+    departmentsList.forEach(d => {
+      sel.innerHTML += `<option value="${d.name}" ${d.name===cur?"selected":""}>${d.name}</option>`;
+    });
+  }
+
+  // ═══ ADD / DELETE ════════════════════════════════════════════
+  window.addLocation = async function() {
+    const name = document.getElementById("new-loc").value.trim();
+    const err  = document.getElementById("loc-err");
+    if (!name) { err.textContent = "⚠️ Enter a location name."; return; }
+    if (locationsList.some(l => l.name.toLowerCase() === name.toLowerCase())) {
+      err.textContent = "⚠️ Location already exists."; return;
+    }
+    err.textContent = "";
+    showLoader();
+    await push(locationsRef, { name });
+    document.getElementById("new-loc").value = "";
+    await loadMasterData();
+    renderLocations();
+    hideLoader();
+  };
+
+  window.deleteLocation = async function(key) {
+    if (!confirm("Delete this location?")) return;
+    showLoader();
+    await remove(ref(db, "locations/" + key));
+    await loadMasterData();
+    renderLocations();
+    hideLoader();
+  };
+
+  window.addDepartment = async function() {
+    const name = document.getElementById("new-dept").value.trim();
+    const err  = document.getElementById("dept-err");
+    if (!name) { err.textContent = "⚠️ Enter a department name."; return; }
+    if (departmentsList.some(d => d.name.toLowerCase() === name.toLowerCase())) {
+      err.textContent = "⚠️ Department already exists."; return;
+    }
+    err.textContent = "";
+    showLoader();
+    await push(departmentsRef, { name });
+    document.getElementById("new-dept").value = "";
+    await loadMasterData();
+    renderDepartments();
+    refreshEmpDeptDropdown();
+    hideLoader();
+  };
+
+  window.deleteDepartment = async function(key) {
+    if (!confirm("Delete this department?")) return;
+    showLoader();
+    await remove(ref(db, "departments/" + key));
+    await loadMasterData();
+    renderDepartments();
+    refreshEmpDeptDropdown();
+    hideLoader();
+  };
+
+  window.addEmployee = async function() {
+    const name  = document.getElementById("new-emp-name").value.trim();
+    const empId = document.getElementById("new-emp-id").value.trim();
+    const dept  = document.getElementById("new-emp-dept").value;
+    const err   = document.getElementById("admin-emp-err");
+    if (!name || !empId || !dept) { err.textContent = "⚠️ All fields are required."; return; }
+    if (employeesList.some(e => e.empId.toLowerCase() === empId.toLowerCase())) {
+      err.textContent = "⚠️ Employee ID already exists."; return;
+    }
+    err.textContent = "";
+    showLoader();
+    await push(employeesRef, { name, empId, department: dept });
+    document.getElementById("new-emp-name").value = "";
+    document.getElementById("new-emp-id").value   = "";
+    document.getElementById("new-emp-dept").value = "";
+    await loadMasterData();
+    renderEmployees();
+    hideLoader();
+  };
+
+  window.deleteEmployee = async function(key) {
+    if (!confirm("Delete this employee?")) return;
+    showLoader();
+    await remove(ref(db, "employees/" + key));
+    await loadMasterData();
+    renderEmployees();
+    hideLoader();
+  };
+
+  // ═══ TAB SWITCH ══════════════════════════════════════════════
+  function showTab(name) {
+    ["locations","departments","employees"].forEach(t => {
+      document.getElementById("tab-" + t).style.display = t === name ? "block" : "none";
+      const btn = document.querySelector(`.tab-btn[data-tab="${t}"]`);
+      if (btn) btn.classList.toggle("active", t === name);
+    });
+  }
+  window.showTab = showTab;
+
+  // ═══ SESSION SCREEN ══════════════════════════════════════════
+  async function openSessionScreen() {
+    showLoader();
+    await loadMasterData();
+
+    const locSel  = document.getElementById("sess-location");
+    const deptSel = document.getElementById("sess-department");
+
+    locSel.innerHTML  = '<option value="">-- Select Location --</option>';
+    deptSel.innerHTML = '<option value="">-- Select Department --</option>';
+
+    locationsList.forEach(l =>
+      locSel.innerHTML += `<option value="${l.name}">${l.name}</option>`);
+    departmentsList.forEach(d =>
+      deptSel.innerHTML += `<option value="${d.name}">${d.name}</option>`);
+
+    document.getElementById("sess-empid").value = "";
+    document.getElementById("sess-err").textContent = "";
+    hideLoader();
+    showScreen("screen-session");
+  }
+  window.openSessionScreen = openSessionScreen;
+
+  window.confirmSession = async function() {
+    const location = document.getElementById("sess-location").value;
+    const dept     = document.getElementById("sess-department").value;
+    const empId    = document.getElementById("sess-empid").value.trim();
+    const err      = document.getElementById("sess-err");
+
+    if (!location) { err.textContent = "⚠️ Please select a Location.";    return; }
+    if (!dept)     { err.textContent = "⚠️ Please select a Department.";  return; }
+    if (!empId)    { err.textContent = "⚠️ Please enter your Employee ID."; return; }
+
+    // Verify employee ID exists AND matches department
+    const match = employeesList.find(
+      e => e.empId.trim().toLowerCase() === empId.toLowerCase()
+        && e.department === dept
+    );
+
+    if (!match) {
+      err.textContent = "❌ Employee ID not found in selected department.";
+      return;
+    }
+
+    globalLocation   = location;
+    globalDepartment = dept;
+    globalUser       = match.name;
+    globalEmpId      = match.empId;
+
+    document.getElementById("badge-location").textContent = "📍 " + globalLocation;
+    document.getElementById("badge-dept").textContent     = "🏢 " + globalDepartment;
+    document.getElementById("badge-user").textContent     = "👤 " + globalUser;
+
+    showLoader();
+    await loadScansFromFirebase();
+    hideLoader();
+    showScreen("screen-main");
+  };
+
+  // ═══ SCAN ════════════════════════════════════════════════════
+  function parseQR(text) {
+    const f = { Quantity:"", RemQuantity:"", ItemCode:"", Desc:"", Lot:"", ManualLot:"", Raw:text };
+    text.split("\n").forEach(line => {
+      const ci = line.indexOf(":");
+      if (ci === -1) return;
+      const key = line.substring(0,ci).trim().toLowerCase().replace(/[\s.]/g,"");
+      const val = line.substring(ci+1).trim();
+      if      (key==="quantity")    f.Quantity    = val;
+      else if (key==="remquantity") f.RemQuantity = val;
+      else if (key==="itemcode")    f.ItemCode    = val;
+      else if (key==="desc")        f.Desc        = val;
+      else if (key==="lot")         f.Lot         = val;
+      else if (key==="manuallot")   f.ManualLot   = val;
+    });
+    return f;
+  }
+
+  function dupKey(f) { return (f.ItemCode + "|" + f.Lot).toLowerCase(); }
 
   function startCamera() {
-    html5QrCode.start(
-      { facingMode: "environment" },
-      { fps: 10, qrbox: 250 },
-      scanSuccess
-    );
+    html5QrCode.start({ facingMode:"environment" }, { fps:10, qrbox:250 }, scanSuccess);
   }
-
-  function stopCamera() {
-    html5QrCode.stop();
-  }
+  function stopCamera() { html5QrCode.stop().catch(()=>{}); }
 
   function scanSuccess(text) {
     const fields = parseQR(text);
-    const key = dupKey(fields);
-
+    const key    = dupKey(fields);
     if (duplicate.has(key)) {
-      // ✅ Show duplicate warning
-      if (navigator.vibrate) navigator.vibrate([100, 50, 100]);
-      showToast("⚠️ Already Added! Lot: " + fields.Lot, "warn");
-      return;
+      if (navigator.vibrate) navigator.vibrate([100,50,100]);
+      showDuplicatePopup(duplicate.get(key));
+    } else {
+      pendingFields = fields;
+      showConfirmPopup(fields);
     }
-    duplicate.add(key);
+  }
 
+  // ═══ POPUPS ══════════════════════════════════════════════════
+  function fillPopup(f) {
+    document.getElementById("pop-qty").textContent    = f.Quantity    || "-";
+    document.getElementById("pop-remqty").textContent = f.RemQuantity || "-";
+    document.getElementById("pop-code").textContent   = f.ItemCode    || "-";
+    document.getElementById("pop-desc").textContent   = f.Desc        || "-";
+    document.getElementById("pop-lot").textContent    = f.Lot         || "-";
+    document.getElementById("pop-mlot").textContent   = f.ManualLot   || "-";
+  }
+
+  function showConfirmPopup(f) {
+    document.getElementById("pop-title").textContent      = "📋 Confirm & Save";
+    document.getElementById("pop-title").style.background = "#007bff";
+    document.getElementById("pop-status").textContent     = "New scan — review and confirm.";
+    document.getElementById("pop-status").style.color     = "#007bff";
+    fillPopup(f);
+    document.getElementById("pop-loc-val").textContent  = globalLocation;
+    document.getElementById("pop-dept-val").textContent = globalDepartment;
+    document.getElementById("pop-user-val").textContent = globalUser + " (" + globalEmpId + ")";
+    document.getElementById("btn-save").style.display   = "inline-block";
+    document.getElementById("btn-close").style.display  = "inline-block";
+    document.getElementById("btn-close2").style.display = "none";
+    document.getElementById("pop-err").textContent = "";
+    document.getElementById("popup-overlay").style.display = "flex";
+  }
+
+  function showDuplicatePopup(ex) {
+    document.getElementById("pop-title").textContent      = "⚠️ Already Added!";
+    document.getElementById("pop-title").style.background = "#ff5722";
+    document.getElementById("pop-status").textContent     = "This record was already scanned and saved.";
+    document.getElementById("pop-status").style.color     = "#ff5722";
+    fillPopup(ex);
+    document.getElementById("pop-loc-val").textContent  = ex.Location    || "-";
+    document.getElementById("pop-dept-val").textContent = ex.Department  || "-";
+    document.getElementById("pop-user-val").textContent = (ex.CreatedUser||"-") + (ex.EmpId ? " ("+ex.EmpId+")" : "");
+    document.getElementById("btn-save").style.display   = "none";
+    document.getElementById("btn-close").style.display  = "none";
+    document.getElementById("btn-close2").style.display = "inline-block";
+    document.getElementById("pop-err").textContent = "";
+    document.getElementById("popup-overlay").style.display = "flex";
+  }
+
+  function closePopup() {
+    document.getElementById("popup-overlay").style.display = "none";
+    pendingFields = null;
+  }
+
+  window.saveRecord = async function() {
+    showLoader();
+    const f    = pendingFields;
+    const key  = dupKey(f);
     const time = new Date().toLocaleString();
-    const no = data.length + 1;
+    const no   = data.length + 1;
 
     const row = {
-      No: no,
-      Quantity: fields.Quantity,
-      "Rem.Quantity": fields.RemQuantity,
-      "Item Code": fields.ItemCode,
-      Desc: fields.Desc,
-      Lot: fields.Lot,
-      "Manual Lot": fields.ManualLot,
-      DateTime: time
+      No: no, Quantity: f.Quantity, "Rem.Quantity": f.RemQuantity,
+      "Item Code": f.ItemCode, Desc: f.Desc, Lot: f.Lot,
+      "Manual Lot": f.ManualLot, Location: globalLocation,
+      Department: globalDepartment, "Created User": globalUser,
+      "Emp ID": globalEmpId, DateTime: time
     };
     data.push(row);
-
-    push(scansRef, {
-      quantity: fields.Quantity,
-      remQuantity: fields.RemQuantity,
-      itemCode: fields.ItemCode,
-      desc: fields.Desc,
-      lot: fields.Lot,
-      manualLot: fields.ManualLot,
-      raw: text,
-      time: new Date().toISOString()
+    duplicate.set(key, {
+      ...f, Location: globalLocation, Department: globalDepartment,
+      CreatedUser: globalUser, EmpId: globalEmpId
     });
 
-    addRowToTable(no, fields, time);
+    await push(scansRef, {
+      quantity: f.Quantity, remQuantity: f.RemQuantity,
+      itemCode: f.ItemCode, desc: f.Desc, lot: f.Lot,
+      manualLot: f.ManualLot, location: globalLocation,
+      department: globalDepartment, createdUser: globalUser,
+      empId: globalEmpId, raw: f.Raw, time: new Date().toISOString()
+    });
+
+    addRowToTable(no, f, time, globalLocation, globalDepartment, globalUser, globalEmpId);
     if (navigator.vibrate) navigator.vibrate(150);
-    showToast("✅ Saved! Lot: " + fields.Lot, "success");
+    closePopup();
+    hideLoader();
+  };
+
+  function addRowToTable(no, f, time, loc, dept, user, empId) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${no}</td><td>${f.Quantity}</td><td>${f.RemQuantity}</td>
+      <td>${f.ItemCode}</td><td>${f.Desc}</td><td>${f.Lot}</td>
+      <td>${f.ManualLot}</td><td>${loc}</td><td>${dept}</td>
+      <td>${user}</td><td>${empId}</td><td>${time}</td>`;
+    document.querySelector("#tbl tbody").appendChild(tr);
   }
 
   function exportExcel() {
-    let ws = XLSX.utils.json_to_sheet(data);
-    let wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.json_to_sheet(data);
+    const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Scans");
     XLSX.writeFile(wb, "ScannedData.xlsx");
   }
 
-  async function loadFromFirebase() {
+  async function loadScansFromFirebase() {
+    document.querySelector("#tbl tbody").innerHTML = "";
+    data = [];
+    duplicate = new Map();
     const snapshot = await get(scansRef);
     if (!snapshot.exists()) return;
-    snapshot.forEach((child) => {
+    snapshot.forEach(child => {
       const d = child.val();
       const f = {
-        Quantity: d.quantity || "",
-        RemQuantity: d.remQuantity || "",
-        ItemCode: d.itemCode || "",
-        Desc: d.desc || "",
-        Lot: d.lot || "",
-        ManualLot: d.manualLot || ""
+        Quantity: d.quantity||"", RemQuantity: d.remQuantity||"",
+        ItemCode: d.itemCode||"", Desc: d.desc||"",
+        Lot: d.lot||"", ManualLot: d.manualLot||"", Raw: d.raw||""
       };
       const key = dupKey(f);
-      if (duplicate.has(key)) return;
-      duplicate.add(key);
-      const time = new Date(d.time).toLocaleString();
-      const no = data.length + 1;
-      data.push({
-        No: no,
-        Quantity: f.Quantity,
-        "Rem.Quantity": f.RemQuantity,
-        "Item Code": f.ItemCode,
-        Desc: f.Desc,
-        Lot: f.Lot,
-        "Manual Lot": f.ManualLot,
-        DateTime: time
-      });
-      addRowToTable(no, f, time);
+      if (!duplicate.has(key)) {
+        duplicate.set(key, {
+          ...f, Location: d.location||"", Department: d.department||"",
+          CreatedUser: d.createdUser||"", EmpId: d.empId||""
+        });
+        const time = new Date(d.time).toLocaleString();
+        const no   = data.length + 1;
+        data.push({
+          No: no, Quantity: f.Quantity, "Rem.Quantity": f.RemQuantity,
+          "Item Code": f.ItemCode, Desc: f.Desc, Lot: f.Lot,
+          "Manual Lot": f.ManualLot, Location: d.location||"",
+          Department: d.department||"", "Created User": d.createdUser||"",
+          "Emp ID": d.empId||"", DateTime: time
+        });
+        addRowToTable(no, f, time, d.location||"", d.department||"", d.createdUser||"", d.empId||"");
+      }
     });
   }
 
+  // ═══ INIT ════════════════════════════════════════════════════
   window.addEventListener("DOMContentLoaded", () => {
-    document.getElementById("start").onclick = startCamera;
-    document.getElementById("stop").onclick = stopCamera;
-    document.getElementById("export").onclick = exportExcel;
-    loadFromFirebase();
+    showScreen("screen-login");
+
+    document.getElementById("btn-login").onclick        = doLogin;
+    document.getElementById("login-pass").onkeydown     = e => { if(e.key==="Enter") doLogin(); };
+    document.getElementById("btn-logout-admin").onclick = () => showScreen("screen-login");
+    document.getElementById("btn-go-session-admin").onclick = openSessionScreen;
+    document.getElementById("btn-go-session-login").onclick = openSessionScreen;
+    document.getElementById("btn-change").onclick       = openSessionScreen;
+    document.getElementById("btn-logout").onclick       = () => showScreen("screen-login");
+    document.getElementById("start").onclick            = startCamera;
+    document.getElementById("stop").onclick             = stopCamera;
+    document.getElementById("export").onclick           = exportExcel;
+    document.getElementById("btn-save").onclick         = saveRecord;
+    document.getElementById("btn-close").onclick        = closePopup;
+    document.getElementById("btn-close2").onclick       = closePopup;
+
+    document.querySelectorAll(".tab-btn").forEach(btn => {
+      btn.onclick = () => showTab(btn.dataset.tab);
+    });
   });
 </script>
 <style>
 * { box-sizing: border-box; }
-body { font-family: Arial, sans-serif; background: #f2f2f2; padding: 15px; margin: 0; }
-h2 { text-align: center; }
-#reader { width: 100%; max-width: 450px; margin: auto; border: 2px solid #2196F3; border-radius: 8px; }
-.buttons { margin: 15px 0; display: flex; gap: 10px; }
-button { flex: 1; padding: 12px; border: none; border-radius: 5px; color: white; font-size: 16px; cursor: pointer; }
-#start { background: #28a745; }
-#stop { background: #dc3545; }
-#export { background: #007bff; }
-.tbl-wrap { overflow-x: auto; }
-table { width: 100%; border-collapse: collapse; background: white; min-width: 800px; }
-th, td { border: 1px solid #ccc; padding: 8px; text-align: center; font-size: 13px; }
-th { background: #007bff; color: white; }
+body { font-family: Arial, sans-serif; background: #f0f4f8; margin: 0; padding: 0; }
 
-/* Toast */
-.toast {
-  visibility: hidden;
-  min-width: 280px;
-  max-width: 90vw;
-  text-align: center;
-  border-radius: 10px;
-  padding: 14px 20px;
-  position: fixed;
-  top: 20px;
-  left: 50%;
-  transform: translateX(-50%);
-  z-index: 9999;
-  font-size: 15px;
-  font-weight: bold;
-  opacity: 0;
-  transition: opacity 0.4s ease;
-  pointer-events: none;
+.center-screen {
+  min-height: 100vh; align-items: center; justify-content: center;
+  padding: 20px; background: linear-gradient(135deg, #1a73e8, #0d47a1);
 }
-.toast.show {
-  visibility: visible;
-  opacity: 1;
+.card {
+  background: white; border-radius: 18px; padding: 30px 28px;
+  width: 100%; max-width: 420px;
+  box-shadow: 0 12px 40px rgba(0,0,0,0.25); text-align: center;
 }
-.toast.success {
-  background: #28a745;
-  color: white;
+.card .logo { font-size: 46px; margin-bottom: 6px; }
+.card h2 { margin: 0 0 4px; color: #1a73e8; font-size: 21px; }
+.card p  { color: #888; font-size: 13px; margin: 0 0 20px; }
+.field-label { text-align:left; font-size:13px; font-weight:bold; color:#555; margin:12px 0 4px; }
+input[type=text], input[type=password], input[type=email], select {
+  width:100%; padding:11px 13px; border:1.5px solid #ddd;
+  border-radius:10px; font-size:15px; background:#f9f9f9; outline:none;
 }
-.toast.warn {
-  background: #ff5722;
-  color: white;
-  animation: shake 0.4s ease;
+input:focus, select:focus { border-color:#1a73e8; }
+.err-msg { color:#dc3545; font-size:13px; margin-top:8px; min-height:18px; text-align:center; }
+.btn-primary {
+  width:100%; margin-top:16px; padding:13px; background:#1a73e8;
+  color:white; border:none; border-radius:10px; font-size:16px;
+  font-weight:bold; cursor:pointer;
 }
-@keyframes shake {
-  0%   { transform: translateX(-50%) translateX(0); }
-  25%  { transform: translateX(-50%) translateX(-8px); }
-  50%  { transform: translateX(-50%) translateX(8px); }
-  75%  { transform: translateX(-50%) translateX(-8px); }
-  100% { transform: translateX(-50%) translateX(0); }
+.btn-primary:hover { background:#1558b0; }
+.btn-secondary {
+  padding:9px 16px; color:white; border:none;
+  border-radius:8px; font-size:13px; cursor:pointer; font-weight:bold;
 }
+
+/* Admin */
+#screen-admin { background:#f0f4f8; min-height:100vh; }
+.admin-header {
+  background:#1a73e8; color:white; padding:14px 20px;
+  display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px;
+}
+.admin-header h2 { margin:0; font-size:17px; }
+.admin-body { padding:16px; max-width:750px; margin:auto; }
+.tabs { display:flex; gap:8px; margin-bottom:16px; flex-wrap:wrap; }
+.tab-btn {
+  padding:9px 20px; border:none; border-radius:20px; font-size:14px;
+  font-weight:bold; cursor:pointer; background:#e0e7ff; color:#1a73e8; transition:all 0.2s;
+}
+.tab-btn.active { background:#1a73e8; color:white; }
+.admin-section {
+  background:white; border-radius:12px; padding:18px;
+  margin-bottom:14px; box-shadow:0 2px 8px rgba(0,0,0,0.06);
+}
+.admin-section h3 { margin:0 0 14px; color:#333; font-size:15px; border-bottom:1px solid #eee; padding-bottom:10px; }
+.add-row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+.add-row input, .add-row select { flex:1; min-width:110px; padding:10px 12px; font-size:14px; }
+.add-row .add-btn {
+  padding:10px 18px; background:#28a745; color:white;
+  border:none; border-radius:8px; font-size:14px; cursor:pointer;
+  font-weight:bold; white-space:nowrap;
+}
+.admin-item {
+  display:flex; align-items:center; justify-content:space-between;
+  padding:10px 14px; border:1px solid #eee; border-radius:8px;
+  margin-top:8px; font-size:13px; background:#fafafa; gap:8px;
+}
+.admin-item span { flex:1; word-break:break-word; }
+.del-btn {
+  background:#dc3545; color:white; border:none;
+  border-radius:6px; padding:6px 12px; cursor:pointer; font-size:12px;
+  white-space:nowrap; font-weight:bold;
+}
+
+/* Session */
+#screen-session { display:none; }
+
+/* Main */
+#screen-main { padding:14px; background:#f0f4f8; min-height:100vh; }
+.top-bar {
+  display:flex; align-items:center; background:#1a73e8; color:white;
+  border-radius:12px; padding:10px 14px; margin-bottom:14px;
+  gap:8px; flex-wrap:wrap;
+}
+.top-bar h2 { margin:0; font-size:14px; flex:1; min-width:80px; }
+.badge {
+  background:rgba(255,255,255,0.2); border-radius:20px;
+  padding:5px 11px; font-size:12px; font-weight:bold; white-space:nowrap;
+}
+#btn-change, #btn-logout {
+  border:none; border-radius:20px; padding:6px 12px;
+  font-size:12px; font-weight:bold; cursor:pointer;
+}
+#btn-change { background:white; color:#1a73e8; }
+#btn-logout { background:#ff5722; color:white; }
+#reader { width:100%; max-width:450px; margin:auto; border:2px solid #1a73e8; border-radius:8px; }
+.buttons { margin:14px 0; display:flex; gap:10px; }
+.buttons button { flex:1; padding:12px; border:none; border-radius:8px; color:white; font-size:14px; font-weight:bold; cursor:pointer; }
+#start  { background:#28a745; }
+#stop   { background:#dc3545; }
+#export { background:#007bff; }
+.tbl-wrap { overflow-x:auto; margin-top:8px; }
+table { width:100%; border-collapse:collapse; background:white; min-width:1000px; }
+th,td { border:1px solid #e0e0e0; padding:8px; text-align:center; font-size:12px; }
+th { background:#1a73e8; color:white; position:sticky; top:0; }
+tr:nth-child(even) { background:#f5f8ff; }
+
+/* Popup */
+#popup-overlay {
+  display:none; position:fixed; inset:0; background:rgba(0,0,0,0.55);
+  z-index:9999; align-items:center; justify-content:center; padding:15px;
+}
+.popup {
+  background:white; border-radius:16px; width:100%; max-width:420px;
+  overflow:hidden; box-shadow:0 8px 30px rgba(0,0,0,0.3); animation:popIn 0.25s ease;
+}
+@keyframes popIn { from{transform:scale(0.85);opacity:0} to{transform:scale(1);opacity:1} }
+#pop-title { color:white; font-size:17px; font-weight:bold; padding:15px 20px; text-align:center; }
+.pop-body  { padding:14px 20px; max-height:65vh; overflow-y:auto; }
+#pop-status { font-size:13px; font-weight:bold; margin-bottom:10px; text-align:center; }
+.pop-row {
+  display:flex; justify-content:space-between; align-items:flex-start;
+  border-bottom:1px solid #f0f0f0; padding:7px 0; font-size:13px; gap:8px;
+}
+.pop-row .lbl { color:#888; font-weight:bold; min-width:90px; flex-shrink:0; }
+.pop-row .val { color:#222; text-align:right; word-break:break-all; }
+.pop-row .val.hi { color:#1a73e8; font-weight:bold; }
+#pop-err { color:#dc3545; font-size:13px; margin-top:6px; text-align:center; }
+.pop-footer { display:flex; gap:10px; padding:12px 20px 14px; }
+.pop-footer button { flex:1; padding:11px; border:none; border-radius:8px; font-size:14px; font-weight:bold; cursor:pointer; color:white; }
+#btn-save   { background:#28a745; }
+#btn-close  { background:#6c757d; }
+#btn-close2 { background:#6c757d; }
+
+/* Loader */
+#loader-overlay {
+  display: none; position: fixed; inset: 0; background: rgba(255,255,255,0.7);
+  z-index: 10000; align-items: center; justify-content: center; backdrop-filter: blur(2px);
+}
+.spinner {
+  width: 50px; height: 50px; border: 5px solid #e0e0e0;
+  border-top: 5px solid #1a73e8; border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+@keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
 </style>
 </head>
 <body>
 
-<!-- Toast Notification -->
-<div id="toast" class="toast"></div>
+<div id="loader-overlay">
+  <div class="spinner"></div>
+</div>
 
-<h2>QR & Barcode Scanner</h2>
-<div id="reader"></div>
-<div class="buttons">
-  <button id="start">Open Camera</button>
-  <button id="stop">Stop</button>
-  <button id="export">Export Excel</button>
+<div id="screen-login" class="center-screen" style="display:flex">
+  <div class="card">
+    <div class="logo">🔐</div>
+    <h2>QR & Barcode Scanner</h2>
+    <p>Admin login or continue as user</p>
+    <div class="field-label">📧 Username</div>
+    <input type="email" id="login-user" placeholder="Admin@QRscan.com">
+    <div class="field-label">🔑 Password</div>
+    <input type="password" id="login-pass" placeholder="Password">
+    <div class="err-msg" id="login-err"></div>
+    <button class="btn-primary" id="btn-login">🔐 Login as Admin</button>
+    <hr style="margin:18px 0;border:none;border-top:1px solid #eee">
+    <button class="btn-primary" id="btn-go-session-login"
+      style="background:#28a745;margin-top:0">📷 Continue as User →</button>
+  </div>
 </div>
-<div class="tbl-wrap">
-  <table id="tbl">
-    <thead>
-      <tr>
-        <th>No</th>
-        <th>Quantity</th>
-        <th>Rem.Quantity</th>
-        <th>Item Code</th>
-        <th>Desc</th>
-        <th>Lot</th>
-        <th>Manual Lot</th>
-        <th>Date Time</th>
-      </tr>
-    </thead>
-    <tbody></tbody>
-  </table>
+
+<div id="screen-admin" style="display:none">
+  <div class="admin-header">
+    <h2>🛠 Admin Panel</h2>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <button class="btn-secondary" id="btn-go-session-admin" style="background:#28a745">📷 Go to Scanner</button>
+      <button class="btn-secondary" id="btn-logout-admin" style="background:#dc3545">🚪 Logout</button>
+    </div>
+  </div>
+  <div class="admin-body">
+    <div class="tabs">
+      <button class="tab-btn active" data-tab="locations">📍 Locations</button>
+      <button class="tab-btn" data-tab="departments">🏢 Departments</button>
+      <button class="tab-btn" data-tab="employees">👤 Employees</button>
+    </div>
+
+    <div id="tab-locations">
+      <div class="admin-section">
+        <h3>📍 Manage Locations</h3>
+        <div class="add-row">
+          <input type="text" id="new-loc" placeholder="e.g. EHV, LT, LT1">
+          <button class="add-btn" onclick="addLocation()">➕ Add</button>
+        </div>
+        <div class="err-msg" id="loc-err" style="text-align:left"></div>
+        <div id="admin-loc-list" style="margin-top:10px"></div>
+      </div>
+    </div>
+
+    <div id="tab-departments" style="display:none">
+      <div class="admin-section">
+        <h3>🏢 Manage Departments</h3>
+        <div class="add-row">
+          <input type="text" id="new-dept" placeholder="e.g. Production, QA">
+          <button class="add-btn" onclick="addDepartment()">➕ Add</button>
+        </div>
+        <div class="err-msg" id="dept-err" style="text-align:left"></div>
+        <div id="admin-dept-list" style="margin-top:10px"></div>
+      </div>
+    </div>
+
+    <div id="tab-employees" style="display:none">
+      <div class="admin-section">
+        <h3>👤 Manage Employees</h3>
+        <div class="add-row">
+          <input type="text" id="new-emp-name" placeholder="Full Name">
+          <input type="text" id="new-emp-id"   placeholder="Employee ID">
+          <select id="new-emp-dept"><option value="">-- Department --</option></select>
+          <button class="add-btn" onclick="addEmployee()">➕ Add</button>
+        </div>
+        <div class="err-msg" id="admin-emp-err" style="text-align:left"></div>
+        <div id="admin-emp-list" style="margin-top:10px"></div>
+      </div>
+    </div>
+  </div>
 </div>
+
+<div id="screen-session" class="center-screen" style="display:none">
+  <div class="card">
+    <div class="logo">📷</div>
+    <h2>Start Scanning Session</h2>
+    <p>Verify your identity to continue</p>
+    <div class="field-label">📍 Location</div>
+    <select id="sess-location"></select>
+    <div class="field-label">🏢 Department</div>
+    <select id="sess-department"></select>
+    <div class="field-label">🪪 Employee ID</div>
+    <input type="text" id="sess-empid" placeholder="Enter your Employee ID">
+    <div class="err-msg" id="sess-err"></div>
+    <button class="btn-primary" onclick="confirmSession()">✅ Verify & Start →</button>
+    <button class="btn-primary" onclick="showScreen('screen-login')"
+      style="background:#6c757d;margin-top:8px">← Back</button>
+  </div>
+</div>
+
+<div id="screen-main" style="display:none">
+  <div class="top-bar">
+    <h2>📷 QR Scanner</h2>
+    <span class="badge" id="badge-location">📍 -</span>
+    <span class="badge" id="badge-dept">🏢 -</span>
+    <span class="badge" id="badge-user">👤 -</span>
+    <button id="btn-change">✏️ Change</button>
+    <button id="btn-logout">🚪 Exit</button>
+  </div>
+  <div id="reader"></div>
+  <div class="buttons">
+    <button id="start">📷 Open Camera</button>
+    <button id="stop">⏹ Stop</button>
+    <button id="export">📥 Export Excel</button>
+  </div>
+  <div class="tbl-wrap">
+    <table id="tbl">
+      <thead>
+        <tr>
+          <th>No</th><th>Quantity</th><th>Rem.Qty</th><th>Item Code</th>
+          <th>Desc</th><th>Lot</th><th>Manual Lot</th>
+          <th>Location</th><th>Department</th><th>User</th><th>Emp ID</th><th>Date Time</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</div>
+
+<div id="popup-overlay">
+  <div class="popup">
+    <div id="pop-title"></div>
+    <div class="pop-body">
+      <div id="pop-status"></div>
+      <div class="pop-row"><span class="lbl">Quantity</span>   <span class="val" id="pop-qty"></span></div>
+      <div class="pop-row"><span class="lbl">Rem.Qty</span>    <span class="val" id="pop-remqty"></span></div>
+      <div class="pop-row"><span class="lbl">Item Code</span>  <span class="val" id="pop-code"></span></div>
+      <div class="pop-row"><span class="lbl">Desc</span>       <span class="val" id="pop-desc"></span></div>
+      <div class="pop-row"><span class="lbl">Lot</span>        <span class="val" id="pop-lot"></span></div>
+      <div class="pop-row"><span class="lbl">Manual Lot</span> <span class="val" id="pop-mlot"></span></div>
+      <div class="pop-row"><span class="lbl">📍 Location</span>  <span class="val hi" id="pop-loc-val"></span></div>
+      <div class="pop-row"><span class="lbl">🏢 Department</span><span class="val hi" id="pop-dept-val"></span></div>
+      <div class="pop-row"><span class="lbl">👤 User</span>      <span class="val hi" id="pop-user-val"></span></div>
+      <div id="pop-err"></div>
+    </div>
+    <div class="pop-footer">
+      <button id="btn-save">✅ Save</button>
+      <button id="btn-close">✖ Cancel</button>
+      <button id="btn-close2">✖ Close</button>
+    </div>
+  </div>
+</div>
+
 </body>
 </html>
