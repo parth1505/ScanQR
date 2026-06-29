@@ -1,677 +1,831 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>QR & Barcode Scanner</title>
-<script src="https://unpkg.com/html5-qrcode"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
-<script type="module">
-  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-  import { getDatabase, ref, push, get, remove } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>QR Scanner Pro</title>
+  <script src="https://unpkg.com/html5-qrcode"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+    import { getDatabase, ref, push, get, remove, update, set } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
 
-  const firebaseConfig = {
-    apiKey: "AIzaSyCJuN5dtsVudZ8Nk_t4q0-ukoff3TGqbow",
-    authDomain: "qr-scanner-48466.firebaseapp.com",
-    databaseURL: "https://qr-scanner-48466-default-rtdb.firebaseio.com",
-    projectId: "qr-scanner-48466",
-    storageBucket: "qr-scanner-48466.firebasestorage.app",
-    messagingSenderId: "1080722195269",
-    appId: "1:1080722195269:web:9240a4d75e262b3241b42c",
-    measurementId: "G-7JESXECVRE"
-  };
+    const firebaseConfig = {
+      apiKey: "AIzaSyCJuN5dtsVudZ8Nk_t4q0-ukoff3TGqbow",
+      authDomain: "qr-scanner-48466.firebaseapp.com",
+      databaseURL: "https://qr-scanner-48466-default-rtdb.firebaseio.com",
+      projectId: "qr-scanner-48466",
+      storageBucket: "qr-scanner-48466.firebasestorage.app",
+      messagingSenderId: "1080722195269",
+      appId: "1:1080722195269:web:9240a4d75e262b3241b42c",
+      measurementId: "G-7JESXECVRE"
+    };
 
-  const app = initializeApp(firebaseConfig);
-  const db  = getDatabase(app);
+    const app = initializeApp(firebaseConfig);
+    const db = getDatabase(app);
 
-  const scansRef       = ref(db, "scans");
-  const locationsRef   = ref(db, "locations");
-  const departmentsRef = ref(db, "departments");
-  const employeesRef   = ref(db, "employees");
+    const scansRef = ref(db, "scans");
+    const locationsRef = ref(db, "locations");
+    const departmentsRef = ref(db, "departments");
+    const employeesRef = ref(db, "employees");
+    const settingsRef = ref(db, "settings");
 
-  let data = [], duplicate = new Map(), pendingFields = null;
-  let globalLocation = "", globalDepartment = "", globalUser = "", globalEmpId = "";
-  let locationsList = [], departmentsList = [], employeesList = [];
+    let data = [], duplicate = new Map(), pendingFields = null;
+    let globalLocation = "", globalDepartment = "", globalUser = "", globalEmpId = "";
+    let locationsList = [], departmentsList = [], employeesList = [], adminDrumsList = [];
+    let currentSettings = {
+      userViewMode: "all",
+      allowDuplicate: false,
+      successSound: true,
+      errorSound: true,
+      vibration: true,
+      theme: "dark",
+      scanDelay: 3,
+      // removed global override, now per user
+    };
+    // Store currently logged in user's canSeeAll flag
+    let currentUserCanSeeAll = false;
 
-  const html5QrCode = new Html5Qrcode("reader");
+    let html5QrCode = null;
+    let cameraRunning = false;
+    let lastScanTime = 0;
+    let scanDelaySeconds = 3;
 
-  // ── Loader helpers ────────────────────────────────────────────
-  function showLoader() { document.getElementById("loader-overlay").style.display = "flex"; }
-  function hideLoader() { document.getElementById("loader-overlay").style.display = "none"; }
+    // Loader
+    function showLoader() { document.getElementById("loader-overlay").style.display = "flex"; }
+    function hideLoader() { document.getElementById("loader-overlay").style.display = "none"; }
 
-  // ── Screen helper ─────────────────────────────────────────────
-  function showScreen(id) {
-    ["screen-login","screen-admin","screen-session","screen-main"]
-      .forEach(s => {
-        const el = document.getElementById(s);
-        el.style.display = "none";
+    // Screen
+    function showScreen(id) {
+      ["screen-login","screen-admin","screen-session","screen-main","screen-dashboard"]
+        .forEach(s => {
+          const el = document.getElementById(s);
+          if (el) el.style.display = "none";
+        });
+      const target = document.getElementById(id);
+      if (target) target.style.display = (id === "screen-admin" || id === "screen-main" || id === "screen-dashboard") ? "block" : "flex";
+    }
+    window.showScreen = showScreen;
+
+    // Search
+    window.filterTable = function(inputId, tableId) {
+      const input = document.getElementById(inputId).value.toLowerCase();
+      const rows = document.querySelectorAll(`#${tableId} tbody tr`);
+      rows.forEach(row => {
+        if(row.cells.length === 1 && row.cells[0].colSpan > 1) return;
+        const text = row.textContent.toLowerCase();
+        row.style.display = text.includes(input) ? "" : "none";
       });
-    const target = document.getElementById(id);
-    target.style.display = (id === "screen-admin" || id === "screen-main") ? "block" : "flex";
-  }
+    };
+    window.filterDivList = function(inputId, listId) {
+      const input = document.getElementById(inputId).value.toLowerCase();
+      const items = document.querySelectorAll(`#${listId} .admin-item`);
+      items.forEach(item => {
+        const text = item.textContent.toLowerCase();
+        item.style.display = text.includes(input) ? "flex" : "none";
+      });
+    };
 
-  // ── Load ALL master data fresh from Firebase ──────────────────
-  async function loadMasterData() {
-    locationsList   = [];
-    departmentsList = [];
-    employeesList   = [];
-
-    const [locSnap, deptSnap, empSnap] = await Promise.all([
-      get(locationsRef),
-      get(departmentsRef),
-      get(employeesRef)
-    ]);
-
-    // THE FIX: Added { } around push to prevent Firebase forEach from exiting early
-    if (locSnap.exists()) {
-      locSnap.forEach(c => { locationsList.push({ key: c.key, name: c.val().name }); });
+    // Load master data
+    async function loadMasterData() {
+      locationsList = []; departmentsList = []; employeesList = []; adminDrumsList = [];
+      const [locSnap, deptSnap, empSnap, scansSnap, setSnap] = await Promise.all([
+        get(locationsRef), get(departmentsRef), get(employeesRef), get(scansRef), get(settingsRef)
+      ]);
+      if (locSnap.exists()) locSnap.forEach(c => { locationsList.push({ key: c.key, name: c.val().name }); });
+      if (deptSnap.exists()) deptSnap.forEach(c => { departmentsList.push({ key: c.key, name: c.val().name }); });
+      if (empSnap.exists()) empSnap.forEach(c => { employeesList.push({ key: c.key, ...c.val() }); });
+      if (scansSnap.exists()) scansSnap.forEach(c => { adminDrumsList.push({ key: c.key, ...c.val() }); });
+      if (setSnap.exists()) {
+        currentSettings = { ...currentSettings, ...setSnap.val() };
+        applySettings();
+      } else {
+        await set(settingsRef, currentSettings);
+      }
     }
-    if (deptSnap.exists()) {
-      deptSnap.forEach(c => { departmentsList.push({ key: c.key, name: c.val().name }); });
-    }
-    if (empSnap.exists()) {
-      empSnap.forEach(c => { employeesList.push({ key: c.key, ...c.val() }); });
-    }
-  }
 
-  // ═══ ADMIN LOGIN ═════════════════════════════════════════════
-  async function doLogin() {
-    const u = document.getElementById("login-user").value.trim();
-    const p = document.getElementById("login-pass").value;
-    document.getElementById("login-err").textContent = "";
-    if (u === "Admin@QRscan.com" && p === "Admin@123") {
+    function applySettings() {
+      document.body.className = currentSettings.theme === "dark" ? "dark-theme" : "light-theme";
+      scanDelaySeconds = currentSettings.scanDelay || 3;
+      document.getElementById("set-allow-duplicate").checked = currentSettings.allowDuplicate || false;
+      document.getElementById("set-success-sound").checked = currentSettings.successSound !== false;
+      document.getElementById("set-error-sound").checked = currentSettings.errorSound !== false;
+      document.getElementById("set-vibration").checked = currentSettings.vibration !== false;
+      document.getElementById("set-theme").value = currentSettings.theme || "dark";
+      document.getElementById("set-scan-delay").value = currentSettings.scanDelay || 3;
+      document.getElementById("set-viewmode").value = currentSettings.userViewMode || "all";
+    }
+
+    // Sounds
+    function playBeep(freq = 800, dur = 200) {
+      if (!currentSettings.successSound && freq === 800) return;
+      if (!currentSettings.errorSound && freq === 400) return;
+      try {
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.connect(gain); gain.connect(ctx.destination);
+        osc.frequency.value = freq; osc.type = "sine"; gain.gain.value = 0.1;
+        osc.start(); setTimeout(() => { osc.stop(); ctx.close(); }, dur);
+      } catch(e) {}
+    }
+    function doVibrate(pattern = 100) {
+      if (!currentSettings.vibration) return;
+      if (navigator.vibrate) navigator.vibrate(pattern);
+    }
+
+    // Admin login
+    async function doLogin() {
+      const u = document.getElementById("login-user").value.trim();
+      const p = document.getElementById("login-pass").value;
+      document.getElementById("login-err").textContent = "";
+      if (u === "Admin@QRscan.com" && p === "Admin@123") {
+        showLoader();
+        await loadMasterData();
+        renderAll();
+        hideLoader();
+        showScreen("screen-admin");
+        showTab("locations");
+        applySettings();
+      } else {
+        document.getElementById("login-err").textContent = "❌ Invalid credentials.";
+      }
+    }
+
+    // Render admin
+    function renderAll() {
+      renderLocations(); renderDepartments(); renderEmployees(); renderDrums(); refreshEmpDeptDropdown();
+    }
+    function renderLocations() {
+      const list = document.getElementById("admin-loc-list");
+      list.innerHTML = "";
+      if (locationsList.length === 0) { list.innerHTML = '<p style="color:#aaa;font-size:13px;margin:8px 0">No locations.</p>'; return; }
+      locationsList.forEach(l => {
+        const div = document.createElement("div"); div.className = "admin-item";
+        div.innerHTML = `<span>📍 ${l.name}</span><button class="del-btn" onclick="deleteLocation('${l.key}')">🗑</button>`;
+        list.appendChild(div);
+      });
+    }
+    function renderDepartments() {
+      const list = document.getElementById("admin-dept-list");
+      list.innerHTML = "";
+      if (departmentsList.length === 0) { list.innerHTML = '<p style="color:#aaa;font-size:13px;margin:8px 0">No departments.</p>'; return; }
+      departmentsList.forEach(d => {
+        const div = document.createElement("div"); div.className = "admin-item";
+        div.innerHTML = `<span>🏢 ${d.name}</span><button class="del-btn" onclick="deleteDepartment('${d.key}')">🗑</button>`;
+        list.appendChild(div);
+      });
+    }
+    function renderEmployees() {
+      const list = document.getElementById("admin-emp-list");
+      list.innerHTML = "";
+      if (employeesList.length === 0) { list.innerHTML = '<p style="color:#aaa;font-size:13px;margin:8px 0">No employees.</p>'; return; }
+      employeesList.forEach(e => {
+        const div = document.createElement("div"); div.className = "admin-item";
+        const isEnabled = e.canScan !== false;
+        const canSeeAll = e.canSeeAll === true;
+        const badge = isEnabled ? '🟢 Active' : '🔴 Disabled';
+        const seeAllBadge = canSeeAll ? '🔓 All Data' : '🔒 Own Only';
+        div.innerHTML = `
+          <div style="flex:1;">👤 <b>${e.name}</b> | ID: <b>${e.empId}</b> | ${e.department} <br/>
+            <span style="font-size:11px;">${badge} | ${seeAllBadge}</span>
+          </div>
+          <div style="display:flex; gap:5px; flex-wrap:wrap;">
+            <button class="del-btn" style="background:${isEnabled ? '#ff9800' : '#28a745'};" onclick="toggleEmployeeStatus('${e.key}', ${isEnabled})">
+              ${isEnabled ? '🚫 Disable' : '✅ Enable'}
+            </button>
+            <button class="del-btn" style="background:${canSeeAll ? '#6c757d' : '#17a2b8'};" onclick="toggleCanSeeAll('${e.key}', ${canSeeAll})">
+              ${canSeeAll ? '🔒 Own Only' : '🔓 All Data'}
+            </button>
+            <button class="del-btn" onclick="deleteEmployee('${e.key}')">🗑</button>
+          </div>`;
+        list.appendChild(div);
+      });
+    }
+    function renderDrums() {
+      const tbody = document.querySelector("#admin-drums-tbl tbody");
+      tbody.innerHTML = "";
+      if (adminDrumsList.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="8" style="color:#aaa;padding:15px;">No scans.</td></tr>';
+        return;
+      }
+      const sorted = [...adminDrumsList].sort((a,b) => new Date(b.time) - new Date(a.time));
+      sorted.forEach(d => {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td><input type="checkbox" class="drum-chk" value="${d.key}"></td>
+          <td>${d.itemCode||'-'}</td><td>${d.lot||'-'}</td><td>${d.quantity||'-'}</td>
+          <td>${d.location||'-'}</td><td>${d.createdUser||'-'}</td><td>${new Date(d.time).toLocaleString()}</td>
+          <td><button class="del-btn" onclick="deleteDrum('${d.key}')">🗑</button></td>`;
+        tbody.appendChild(tr);
+      });
+      document.getElementById("select-all-drums").checked = false;
+    }
+    function refreshEmpDeptDropdown() {
+      const sel = document.getElementById("new-emp-dept");
+      const cur = sel.value;
+      sel.innerHTML = '<option value="">-- Department --</option>';
+      departmentsList.forEach(d => { sel.innerHTML += `<option value="${d.name}" ${d.name===cur?"selected":""}>${d.name}</option>`; });
+    }
+
+    // Admin actions
+    window.updateSettings = async function() {
+      const mode = document.getElementById("set-viewmode").value;
+      const allowDup = document.getElementById("set-allow-duplicate").checked;
+      const successSound = document.getElementById("set-success-sound").checked;
+      const errorSound = document.getElementById("set-error-sound").checked;
+      const vibration = document.getElementById("set-vibration").checked;
+      const theme = document.getElementById("set-theme").value;
+      const delay = parseInt(document.getElementById("set-scan-delay").value) || 3;
+
+      showLoader();
+      await update(settingsRef, {
+        userViewMode: mode, allowDuplicate: allowDup, successSound, errorSound, vibration, theme, scanDelay: delay
+      });
+      currentSettings = { ...currentSettings, userViewMode: mode, allowDuplicate: allowDup, successSound, errorSound, vibration, theme, scanDelay: delay };
+      applySettings();
+      document.getElementById("set-msg").style.display = "block";
+      setTimeout(() => document.getElementById("set-msg").style.display = "none", 2000);
+      hideLoader();
+    };
+
+    // Toggle per-user canSeeAll
+    window.toggleCanSeeAll = async function(key, currentVal) {
+      showLoader();
+      await update(ref(db, "employees/" + key), { canSeeAll: !currentVal });
+      await loadMasterData(); renderEmployees(); hideLoader();
+    };
+
+    window.toggleEmployeeStatus = async function(key, currentStatus) {
+      showLoader();
+      await update(ref(db, "employees/" + key), { canScan: !currentStatus });
+      await loadMasterData(); renderEmployees(); hideLoader();
+    };
+    window.addLocation = async function() {
+      const name = document.getElementById("new-loc").value.trim();
+      if (!name) return;
+      showLoader(); await push(locationsRef, { name }); document.getElementById("new-loc").value = ""; await loadMasterData(); renderLocations(); hideLoader();
+    };
+    window.deleteLocation = async function(key) {
+      if (!confirm("Delete?")) return;
+      showLoader(); await remove(ref(db, "locations/" + key)); await loadMasterData(); renderLocations(); hideLoader();
+    };
+    window.addDepartment = async function() {
+      const name = document.getElementById("new-dept").value.trim();
+      if (!name) return;
+      showLoader(); await push(departmentsRef, { name }); document.getElementById("new-dept").value = ""; await loadMasterData(); renderDepartments(); refreshEmpDeptDropdown(); hideLoader();
+    };
+    window.deleteDepartment = async function(key) {
+      if (!confirm("Delete?")) return;
+      showLoader(); await remove(ref(db, "departments/" + key)); await loadMasterData(); renderDepartments(); refreshEmpDeptDropdown(); hideLoader();
+    };
+    window.addEmployee = async function() {
+      const name = document.getElementById("new-emp-name").value.trim(), empId = document.getElementById("new-emp-id").value.trim(), dept = document.getElementById("new-emp-dept").value;
+      const err = document.getElementById("admin-emp-err");
+      if (!name || !empId || !dept) { err.textContent = "⚠️ All fields required."; return; }
+      if (employeesList.some(e => e.empId.toLowerCase() === empId.toLowerCase())) { err.textContent = "⚠️ ID exists."; return; }
+      err.textContent = "";
+      showLoader(); await push(employeesRef, { name, empId, department: dept, canScan: true, canSeeAll: false });
+      document.getElementById("new-emp-name").value = ""; document.getElementById("new-emp-id").value = ""; document.getElementById("new-emp-dept").value = "";
+      await loadMasterData(); renderEmployees(); hideLoader();
+    };
+    window.deleteEmployee = async function(key) {
+      if (!confirm("Delete?")) return;
+      showLoader(); await remove(ref(db, "employees/" + key)); await loadMasterData(); renderEmployees(); hideLoader();
+    };
+
+    // Drums actions
+    window.toggleSelectAllDrums = function(el) { document.querySelectorAll('.drum-chk').forEach(chk => chk.checked = el.checked); };
+    window.deleteDrum = async function(key) {
+      if (!confirm("Delete?")) return;
+      showLoader(); await remove(ref(db, "scans/" + key)); await loadMasterData(); renderDrums(); hideLoader();
+    };
+    window.deleteSelectedDrums = async function() {
+      const chks = document.querySelectorAll('.drum-chk:checked');
+      if (chks.length === 0) { alert("Select at least one."); return; }
+      if (!confirm(`Delete ${chks.length}?`)) return;
+      showLoader();
+      await Promise.all(Array.from(chks).map(chk => remove(ref(db, "scans/" + chk.value))));
+      await loadMasterData(); renderDrums(); hideLoader();
+    };
+    window.exportAdminExcel = function() {
+      const formatted = adminDrumsList.map(d => ({
+        "Item Code": d.itemCode||"", "Lot": d.lot||"", "Quantity": d.quantity||"",
+        "Rem Qty": d.remQuantity||"", "Desc": d.desc||"", "Manual Lot": d.manualLot||"",
+        "Location": d.location||"", "Dept": d.department||"", "User": d.createdUser||"",
+        "Emp ID": d.empId||"", "Date": new Date(d.time).toLocaleString(),
+        "IP": d.ip||"", "Device": d.device||"", "Browser": d.browser||""
+      }));
+      const ws = XLSX.utils.json_to_sheet(formatted);
+      const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, "AllScans");
+      XLSX.writeFile(wb, "Admin_All_Scans.xlsx");
+    };
+
+    // Tabs
+    function showTab(name) {
+      ["locations","departments","employees","drums","dashboard","settings"].forEach(t => {
+        const el = document.getElementById("tab-" + t);
+        if (el) el.style.display = t === name ? "block" : "none";
+        const btn = document.querySelector(`.tab-btn[data-tab="${t}"]`);
+        if (btn) btn.classList.toggle("active", t === name);
+      });
+      if (name === "dashboard") {
+        loadDashboardData();
+      }
+    }
+    window.showTab = showTab;
+
+    // ─── DASHBOARD (Admin & User) ──────────────────────────────
+    let chartDaily = null, chartUser = null, chartLocation = null;
+
+    async function loadDashboardData() {
       showLoader();
       await loadMasterData();
-      renderAll();
+
+      // Determine if current user can see all data (per-user flag)
+      const canSeeAll = currentUserCanSeeAll || false;
+      let filteredScans = adminDrumsList;
+      if (!canSeeAll && currentSettings.userViewMode === 'own' && globalEmpId) {
+        filteredScans = adminDrumsList.filter(d => d.empId === globalEmpId);
+      }
+
+      const today = new Date().toDateString();
+      const todayScans = filteredScans.filter(d => new Date(d.time).toDateString() === today);
+
+      document.getElementById("dash-today").textContent = todayScans.length;
+      document.getElementById("dash-users").textContent = employeesList.length;
+      document.getElementById("dash-locations").textContent = locationsList.length;
+      document.getElementById("dash-departments").textContent = departmentsList.length;
+
+      // Most Active Employee (user wise)
+      const empCount = {};
+      filteredScans.forEach(d => {
+        const key = d.createdUser + "|" + d.empId;
+        empCount[key] = (empCount[key] || 0) + 1;
+      });
+      let topEmp = "N/A", topEmpCount = 0;
+      for (const [key, count] of Object.entries(empCount)) {
+        if (count > topEmpCount) { topEmpCount = count; topEmp = key.split("|")[0]; }
+      }
+      document.getElementById("dash-top-emp").textContent = topEmp + (topEmpCount > 0 ? ` (${topEmpCount})` : "");
+
+      // Most Active Department
+      const deptCount = {};
+      filteredScans.forEach(d => { const dept = d.department || "Unknown"; deptCount[dept] = (deptCount[dept] || 0) + 1; });
+      let topDept = "N/A", topDeptCount = 0;
+      for (const [dept, count] of Object.entries(deptCount)) {
+        if (count > topDeptCount) { topDeptCount = count; topDept = dept; }
+      }
+      document.getElementById("dash-top-dept").textContent = topDept + (topDeptCount > 0 ? ` (${topDeptCount})` : "");
+
+      // Most Active Location
+      const locCount = {};
+      filteredScans.forEach(d => { const loc = d.location || "Unknown"; locCount[loc] = (locCount[loc] || 0) + 1; });
+      let topLoc = "N/A", topLocCount = 0;
+      for (const [loc, count] of Object.entries(locCount)) {
+        if (count > topLocCount) { topLocCount = count; topLoc = loc; }
+      }
+      document.getElementById("dash-top-loc").textContent = topLoc + (topLocCount > 0 ? ` (${topLocCount})` : "");
+
+      // Charts
+      const days = [], dayCounts = [];
+      for (let i = 6; i >= 0; i--) {
+        const d = new Date(); d.setDate(d.getDate() - i);
+        const key = d.toDateString();
+        days.push(d.toLocaleDateString());
+        dayCounts.push(filteredScans.filter(sc => new Date(sc.time).toDateString() === key).length);
+      }
+      if (chartDaily) chartDaily.destroy();
+      chartDaily = new Chart(document.getElementById("chart-daily"), {
+        type: 'bar',
+        data: { labels: days, datasets: [{ label: 'Scans', data: dayCounts, backgroundColor: '#1a73e8' }] },
+        options: { responsive: true, plugins: { legend: { display: false } } }
+      });
+
+      // User wise scans (top 5 users)
+      const userLabels = Object.keys(empCount).slice(0,5).map(k => k.split("|")[0]);
+      const userData = Object.values(empCount).slice(0,5);
+      if (chartUser) chartUser.destroy();
+      chartUser = new Chart(document.getElementById("chart-user"), {
+        type: 'pie',
+        data: { labels: userLabels.length ? userLabels : ['No Data'], datasets: [{ data: userData.length ? userData : [1], backgroundColor: ['#1a73e8','#28a745','#ff5722','#ffc107','#6c757d'] }] },
+        options: { responsive: true, plugins: { legend: { position: 'bottom' } } }
+      });
+
+      // Location wise
+      const locLabels = Object.keys(locCount);
+      const locData = Object.values(locCount);
+      if (chartLocation) chartLocation.destroy();
+      chartLocation = new Chart(document.getElementById("chart-loc"), {
+        type: 'pie',
+        data: { labels: locLabels.length ? locLabels : ['No Data'], datasets: [{ data: locData.length ? locData : [1], backgroundColor: ['#1a73e8','#28a745','#ff5722','#ffc107','#6c757d'] }] },
+        options: { responsive: true, plugins: { legend: { position: 'bottom' } } }
+      });
+
       hideLoader();
-      showScreen("screen-admin");
-      showTab("locations");
-    } else {
-      document.getElementById("login-err").textContent = "❌ Invalid username or password.";
-    }
-  }
-
-  // ═══ ADMIN RENDER ════════════════════════════════════════════
-  function renderAll() {
-    renderLocations();
-    renderDepartments();
-    renderEmployees();
-    refreshEmpDeptDropdown();
-  }
-
-  function renderLocations() {
-    const list = document.getElementById("admin-loc-list");
-    list.innerHTML = "";
-    if (locationsList.length === 0) {
-      list.innerHTML = '<p style="color:#aaa;font-size:13px;margin:8px 0">No locations added yet.</p>';
-      return;
-    }
-    locationsList.forEach(l => {
-      const div = document.createElement("div");
-      div.className = "admin-item";
-      div.innerHTML = `<span>📍 ${l.name}</span>
-        <button class="del-btn" onclick="deleteLocation('${l.key}')">🗑 Delete</button>`;
-      list.appendChild(div);
-    });
-  }
-
-  function renderDepartments() {
-    const list = document.getElementById("admin-dept-list");
-    list.innerHTML = "";
-    if (departmentsList.length === 0) {
-      list.innerHTML = '<p style="color:#aaa;font-size:13px;margin:8px 0">No departments added yet.</p>';
-      return;
-    }
-    departmentsList.forEach(d => {
-      const div = document.createElement("div");
-      div.className = "admin-item";
-      div.innerHTML = `<span>🏢 ${d.name}</span>
-        <button class="del-btn" onclick="deleteDepartment('${d.key}')">🗑 Delete</button>`;
-      list.appendChild(div);
-    });
-  }
-
-  function renderEmployees() {
-    const list = document.getElementById("admin-emp-list");
-    list.innerHTML = "";
-    if (employeesList.length === 0) {
-      list.innerHTML = '<p style="color:#aaa;font-size:13px;margin:8px 0">No employees added yet.</p>';
-      return;
-    }
-    employeesList.forEach(e => {
-      const div = document.createElement("div");
-      div.className = "admin-item";
-      div.innerHTML = `
-        <span>👤 <b>${e.name}</b> &nbsp;|&nbsp; ID: <b>${e.empId}</b> &nbsp;|&nbsp; 🏢 ${e.department}</span>
-        <button class="del-btn" onclick="deleteEmployee('${e.key}')">🗑 Delete</button>`;
-      list.appendChild(div);
-    });
-  }
-
-  function refreshEmpDeptDropdown() {
-    const sel = document.getElementById("new-emp-dept");
-    const cur = sel.value;
-    sel.innerHTML = '<option value="">-- Department --</option>';
-    departmentsList.forEach(d => {
-      sel.innerHTML += `<option value="${d.name}" ${d.name===cur?"selected":""}>${d.name}</option>`;
-    });
-  }
-
-  // ═══ ADD / DELETE ════════════════════════════════════════════
-  window.addLocation = async function() {
-    const name = document.getElementById("new-loc").value.trim();
-    const err  = document.getElementById("loc-err");
-    if (!name) { err.textContent = "⚠️ Enter a location name."; return; }
-    if (locationsList.some(l => l.name.toLowerCase() === name.toLowerCase())) {
-      err.textContent = "⚠️ Location already exists."; return;
-    }
-    err.textContent = "";
-    showLoader();
-    await push(locationsRef, { name });
-    document.getElementById("new-loc").value = "";
-    await loadMasterData();
-    renderLocations();
-    hideLoader();
-  };
-
-  window.deleteLocation = async function(key) {
-    if (!confirm("Delete this location?")) return;
-    showLoader();
-    await remove(ref(db, "locations/" + key));
-    await loadMasterData();
-    renderLocations();
-    hideLoader();
-  };
-
-  window.addDepartment = async function() {
-    const name = document.getElementById("new-dept").value.trim();
-    const err  = document.getElementById("dept-err");
-    if (!name) { err.textContent = "⚠️ Enter a department name."; return; }
-    if (departmentsList.some(d => d.name.toLowerCase() === name.toLowerCase())) {
-      err.textContent = "⚠️ Department already exists."; return;
-    }
-    err.textContent = "";
-    showLoader();
-    await push(departmentsRef, { name });
-    document.getElementById("new-dept").value = "";
-    await loadMasterData();
-    renderDepartments();
-    refreshEmpDeptDropdown();
-    hideLoader();
-  };
-
-  window.deleteDepartment = async function(key) {
-    if (!confirm("Delete this department?")) return;
-    showLoader();
-    await remove(ref(db, "departments/" + key));
-    await loadMasterData();
-    renderDepartments();
-    refreshEmpDeptDropdown();
-    hideLoader();
-  };
-
-  window.addEmployee = async function() {
-    const name  = document.getElementById("new-emp-name").value.trim();
-    const empId = document.getElementById("new-emp-id").value.trim();
-    const dept  = document.getElementById("new-emp-dept").value;
-    const err   = document.getElementById("admin-emp-err");
-    if (!name || !empId || !dept) { err.textContent = "⚠️ All fields are required."; return; }
-    if (employeesList.some(e => e.empId.toLowerCase() === empId.toLowerCase())) {
-      err.textContent = "⚠️ Employee ID already exists."; return;
-    }
-    err.textContent = "";
-    showLoader();
-    await push(employeesRef, { name, empId, department: dept });
-    document.getElementById("new-emp-name").value = "";
-    document.getElementById("new-emp-id").value   = "";
-    document.getElementById("new-emp-dept").value = "";
-    await loadMasterData();
-    renderEmployees();
-    hideLoader();
-  };
-
-  window.deleteEmployee = async function(key) {
-    if (!confirm("Delete this employee?")) return;
-    showLoader();
-    await remove(ref(db, "employees/" + key));
-    await loadMasterData();
-    renderEmployees();
-    hideLoader();
-  };
-
-  // ═══ TAB SWITCH ══════════════════════════════════════════════
-  function showTab(name) {
-    ["locations","departments","employees"].forEach(t => {
-      document.getElementById("tab-" + t).style.display = t === name ? "block" : "none";
-      const btn = document.querySelector(`.tab-btn[data-tab="${t}"]`);
-      if (btn) btn.classList.toggle("active", t === name);
-    });
-  }
-  window.showTab = showTab;
-
-  // ═══ SESSION SCREEN ══════════════════════════════════════════
-  async function openSessionScreen() {
-    showLoader();
-    await loadMasterData();
-
-    const locSel  = document.getElementById("sess-location");
-    const deptSel = document.getElementById("sess-department");
-
-    locSel.innerHTML  = '<option value="">-- Select Location --</option>';
-    deptSel.innerHTML = '<option value="">-- Select Department --</option>';
-
-    locationsList.forEach(l =>
-      locSel.innerHTML += `<option value="${l.name}">${l.name}</option>`);
-    departmentsList.forEach(d =>
-      deptSel.innerHTML += `<option value="${d.name}">${d.name}</option>`);
-
-    document.getElementById("sess-empid").value = "";
-    document.getElementById("sess-err").textContent = "";
-    hideLoader();
-    showScreen("screen-session");
-  }
-  window.openSessionScreen = openSessionScreen;
-
-  window.confirmSession = async function() {
-    const location = document.getElementById("sess-location").value;
-    const dept     = document.getElementById("sess-department").value;
-    const empId    = document.getElementById("sess-empid").value.trim();
-    const err      = document.getElementById("sess-err");
-
-    if (!location) { err.textContent = "⚠️ Please select a Location.";    return; }
-    if (!dept)     { err.textContent = "⚠️ Please select a Department.";  return; }
-    if (!empId)    { err.textContent = "⚠️ Please enter your Employee ID."; return; }
-
-    // Verify employee ID exists AND matches department
-    const match = employeesList.find(
-      e => e.empId.trim().toLowerCase() === empId.toLowerCase()
-        && e.department === dept
-    );
-
-    if (!match) {
-      err.textContent = "❌ Employee ID not found in selected department.";
-      return;
     }
 
-    globalLocation   = location;
-    globalDepartment = dept;
-    globalUser       = match.name;
-    globalEmpId      = match.empId;
+    // ─── SESSION ──────────────────────────────────────────────────
+    async function openSessionScreen() {
+      showLoader(); await loadMasterData();
+      const locSel = document.getElementById("sess-location"), deptSel = document.getElementById("sess-department");
+      locSel.innerHTML = '<option value="">-- Location --</option>'; deptSel.innerHTML = '<option value="">-- Department --</option>';
+      locationsList.forEach(l => locSel.innerHTML += `<option value="${l.name}">${l.name}</option>`);
+      departmentsList.forEach(d => deptSel.innerHTML += `<option value="${d.name}">${d.name}</option>`);
+      document.getElementById("sess-empid").value = ""; document.getElementById("sess-err").textContent = "";
+      hideLoader(); showScreen("screen-session");
+    }
+    window.openSessionScreen = openSessionScreen;
 
-    document.getElementById("badge-location").textContent = "📍 " + globalLocation;
-    document.getElementById("badge-dept").textContent     = "🏢 " + globalDepartment;
-    document.getElementById("badge-user").textContent     = "👤 " + globalUser;
+    window.confirmSession = async function() {
+      const location = document.getElementById("sess-location").value;
+      const dept = document.getElementById("sess-department").value;
+      const empId = document.getElementById("sess-empid").value.trim();
+      const err = document.getElementById("sess-err");
+      if (!location || !dept || !empId) { err.textContent = "⚠️ All fields required."; return; }
+      const match = employeesList.find(e => e.empId.trim().toLowerCase() === empId.toLowerCase() && e.department === dept);
+      if (!match) { err.textContent = "❌ Employee not found."; return; }
+      if (match.canScan === false) { err.textContent = "⛔ Access disabled."; return; }
 
-    showLoader();
-    await loadScansFromFirebase();
-    hideLoader();
-    showScreen("screen-main");
-  };
+      globalLocation = location; globalDepartment = dept; globalUser = match.name; globalEmpId = match.empId;
+      // Set per-user canSeeAll from employee record
+      currentUserCanSeeAll = match.canSeeAll === true;
 
-  // ═══ SCAN ════════════════════════════════════════════════════
-  function parseQR(text) {
-    const f = { Quantity:"", RemQuantity:"", ItemCode:"", Desc:"", Lot:"", ManualLot:"", Raw:text };
-    text.split("\n").forEach(line => {
-      const ci = line.indexOf(":");
-      if (ci === -1) return;
-      const key = line.substring(0,ci).trim().toLowerCase().replace(/[\s.]/g,"");
-      const val = line.substring(ci+1).trim();
-      if      (key==="quantity")    f.Quantity    = val;
-      else if (key==="remquantity") f.RemQuantity = val;
-      else if (key==="itemcode")    f.ItemCode    = val;
-      else if (key==="desc")        f.Desc        = val;
-      else if (key==="lot")         f.Lot         = val;
-      else if (key==="manuallot")   f.ManualLot   = val;
-    });
-    return f;
-  }
+      document.getElementById("badge-location").textContent = "📍 " + globalLocation;
+      document.getElementById("badge-dept").textContent = "🏢 " + globalDepartment;
+      document.getElementById("badge-user").textContent = "👤 " + globalUser;
 
-  function dupKey(f) { return (f.ItemCode + "|" + f.Lot).toLowerCase(); }
+      showLoader(); await loadScansFromFirebase(); hideLoader();
+      showScreen("screen-main");
+      applySettings();
 
-  function startCamera() {
-    html5QrCode.start({ facingMode:"environment" }, { fps:10, qrbox:250 }, scanSuccess);
-  }
-  function stopCamera() { html5QrCode.stop().catch(()=>{}); }
+      document.getElementById("user-dashboard-btn").style.display = "inline-block";
+    };
+    window.confirmSession = confirmSession;
 
-  function scanSuccess(text) {
-    const fields = parseQR(text);
-    const key    = dupKey(fields);
-    if (duplicate.has(key)) {
-      if (navigator.vibrate) navigator.vibrate([100,50,100]);
-      showDuplicatePopup(duplicate.get(key));
-    } else {
+    // ─── SCAN ─────────────────────────────────────────────────────
+    function parseQR(text) {
+      const f = { Quantity:"", RemQuantity:"", ItemCode:"", Desc:"", Lot:"", ManualLot:"", Raw:text };
+      text.split("\n").forEach(line => {
+        const ci = line.indexOf(":"); if (ci === -1) return;
+        const key = line.substring(0,ci).trim().toLowerCase().replace(/[\s.]/g,""), val = line.substring(ci+1).trim();
+        if(key==="quantity") f.Quantity=val; else if(key==="remquantity") f.RemQuantity=val;
+        else if(key==="itemcode") f.ItemCode=val; else if(key==="desc") f.Desc=val;
+        else if(key==="lot") f.Lot=val; else if(key==="manuallot") f.ManualLot=val;
+      }); return f;
+    }
+    function dupKey(f) { return (f.ItemCode + "|" + f.Lot).toLowerCase(); }
+
+    async function startCamera() {
+      if (cameraRunning) return;
+      try {
+        if (!html5QrCode) html5QrCode = new Html5Qrcode("reader");
+        await html5QrCode.start({ facingMode: "environment" }, { fps: 10, qrbox: 250 }, scanSuccess);
+        cameraRunning = true;
+        document.getElementById("start").style.display = "none";
+        document.getElementById("stop").style.display = "block";
+      } catch(e) { console.error(e); }
+    }
+    async function stopCamera() {
+      if (!cameraRunning) return;
+      try { await html5QrCode.stop(); await html5QrCode.clear(); } catch(e) {}
+      html5QrCode = null; cameraRunning = false;
+      document.getElementById("start").style.display = "block";
+      document.getElementById("stop").style.display = "none";
+    }
+    async function releaseCamera() {
+      if (!cameraRunning) return;
+      try { await html5QrCode.stop(); await html5QrCode.clear(); } catch(e) {}
+      html5QrCode = null; cameraRunning = false;
+      document.getElementById("start").style.display = "block";
+      document.getElementById("stop").style.display = "none";
+    }
+
+    function scanSuccess(text) {
+      const now = Date.now();
+      if (now - lastScanTime < scanDelaySeconds * 1000) {
+        playBeep(300,100); doVibrate([50,50,50]); return;
+      }
+      lastScanTime = now;
+      const fields = parseQR(text), key = dupKey(fields);
+      const isDup = duplicate.has(key);
+      if (isDup && !currentSettings.allowDuplicate) {
+        playBeep(400,300); doVibrate([100,50,100]);
+        showDuplicatePopup(duplicate.get(key));
+        return;
+      }
       pendingFields = fields;
+      playBeep(800,150); doVibrate(100);
       showConfirmPopup(fields);
     }
-  }
 
-  // ═══ POPUPS ══════════════════════════════════════════════════
-  function fillPopup(f) {
-    document.getElementById("pop-qty").textContent    = f.Quantity    || "-";
-    document.getElementById("pop-remqty").textContent = f.RemQuantity || "-";
-    document.getElementById("pop-code").textContent   = f.ItemCode    || "-";
-    document.getElementById("pop-desc").textContent   = f.Desc        || "-";
-    document.getElementById("pop-lot").textContent    = f.Lot         || "-";
-    document.getElementById("pop-mlot").textContent   = f.ManualLot   || "-";
-  }
+    // Popups
+    function fillPopup(f) {
+      document.getElementById("pop-qty").textContent = f.Quantity||"-";
+      document.getElementById("pop-remqty").textContent = f.RemQuantity||"-";
+      document.getElementById("pop-code").textContent = f.ItemCode||"-";
+      document.getElementById("pop-desc").textContent = f.Desc||"-";
+      document.getElementById("pop-lot").textContent = f.Lot||"-";
+      document.getElementById("pop-mlot").textContent = f.ManualLot||"-";
+    }
+    function showConfirmPopup(f) {
+      document.getElementById("pop-title").textContent = "📋 Confirm & Save";
+      document.getElementById("pop-title").style.background = "#007bff";
+      document.getElementById("pop-status").textContent = "New scan — review and confirm.";
+      document.getElementById("pop-status").style.color = "#007bff";
+      fillPopup(f);
+      document.getElementById("pop-loc-val").textContent = globalLocation;
+      document.getElementById("pop-dept-val").textContent = globalDepartment;
+      document.getElementById("pop-user-val").textContent = globalUser + " (" + globalEmpId + ")";
+      document.getElementById("btn-save").style.display = "inline-block";
+      document.getElementById("btn-close").style.display = "inline-block";
+      document.getElementById("btn-close2").style.display = "none";
+      document.getElementById("popup-overlay").style.display = "flex";
+    }
+    function showDuplicatePopup(ex) {
+      document.getElementById("pop-title").textContent = "⚠️ Already Added!";
+      document.getElementById("pop-title").style.background = "#ff5722";
+      document.getElementById("pop-status").textContent = "This record was already scanned and saved.";
+      document.getElementById("pop-status").style.color = "#ff5722";
+      fillPopup(ex);
+      document.getElementById("pop-loc-val").textContent = ex.Location||"-";
+      document.getElementById("pop-dept-val").textContent = ex.Department||"-";
+      document.getElementById("pop-user-val").textContent = (ex.CreatedUser||"-") + (ex.EmpId ? " ("+ex.EmpId+")" : "");
+      document.getElementById("btn-save").style.display = "none";
+      document.getElementById("btn-close").style.display = "none";
+      document.getElementById("btn-close2").style.display = "inline-block";
+      document.getElementById("popup-overlay").style.display = "flex";
+    }
+    window.closePopup = function() { document.getElementById("popup-overlay").style.display = "none"; pendingFields = null; };
 
-  function showConfirmPopup(f) {
-    document.getElementById("pop-title").textContent      = "📋 Confirm & Save";
-    document.getElementById("pop-title").style.background = "#007bff";
-    document.getElementById("pop-status").textContent     = "New scan — review and confirm.";
-    document.getElementById("pop-status").style.color     = "#007bff";
-    fillPopup(f);
-    document.getElementById("pop-loc-val").textContent  = globalLocation;
-    document.getElementById("pop-dept-val").textContent = globalDepartment;
-    document.getElementById("pop-user-val").textContent = globalUser + " (" + globalEmpId + ")";
-    document.getElementById("btn-save").style.display   = "inline-block";
-    document.getElementById("btn-close").style.display  = "inline-block";
-    document.getElementById("btn-close2").style.display = "none";
-    document.getElementById("pop-err").textContent = "";
-    document.getElementById("popup-overlay").style.display = "flex";
-  }
+    window.saveRecord = async function() {
+      showLoader();
+      const f = pendingFields, key = dupKey(f), time = new Date().toISOString();
+      let ip = "Unknown";
+      try { const res = await fetch('https://api.ipify.org?format=json'); const data = await res.json(); ip = data.ip || "Unknown"; } catch(e) {}
+      const ua = navigator.userAgent;
+      let device = "Unknown", browser = "Unknown";
+      if (/iPhone|iPad|iPod/.test(ua)) device = "iOS"; else if (/Android/.test(ua)) device = "Android"; else if (/Windows/.test(ua)) device = "Windows"; else if (/Mac/.test(ua)) device = "Mac";
+      if (/Chrome/.test(ua) && !/Edg/.test(ua)) browser = "Chrome"; else if (/Firefox/.test(ua)) browser = "Firefox"; else if (/Safari/.test(ua) && !/Chrome/.test(ua)) browser = "Safari"; else if (/Edg/.test(ua)) browser = "Edge";
 
-  function showDuplicatePopup(ex) {
-    document.getElementById("pop-title").textContent      = "⚠️ Already Added!";
-    document.getElementById("pop-title").style.background = "#ff5722";
-    document.getElementById("pop-status").textContent     = "This record was already scanned and saved.";
-    document.getElementById("pop-status").style.color     = "#ff5722";
-    fillPopup(ex);
-    document.getElementById("pop-loc-val").textContent  = ex.Location    || "-";
-    document.getElementById("pop-dept-val").textContent = ex.Department  || "-";
-    document.getElementById("pop-user-val").textContent = (ex.CreatedUser||"-") + (ex.EmpId ? " ("+ex.EmpId+")" : "");
-    document.getElementById("btn-save").style.display   = "none";
-    document.getElementById("btn-close").style.display  = "none";
-    document.getElementById("btn-close2").style.display = "inline-block";
-    document.getElementById("pop-err").textContent = "";
-    document.getElementById("popup-overlay").style.display = "flex";
-  }
-
-  function closePopup() {
-    document.getElementById("popup-overlay").style.display = "none";
-    pendingFields = null;
-  }
-
-  window.saveRecord = async function() {
-    showLoader();
-    const f    = pendingFields;
-    const key  = dupKey(f);
-    const time = new Date().toLocaleString();
-    const no   = data.length + 1;
-
-    const row = {
-      No: no, Quantity: f.Quantity, "Rem.Quantity": f.RemQuantity,
-      "Item Code": f.ItemCode, Desc: f.Desc, Lot: f.Lot,
-      "Manual Lot": f.ManualLot, Location: globalLocation,
-      Department: globalDepartment, "Created User": globalUser,
-      "Emp ID": globalEmpId, DateTime: time
-    };
-    data.push(row);
-    duplicate.set(key, {
-      ...f, Location: globalLocation, Department: globalDepartment,
-      CreatedUser: globalUser, EmpId: globalEmpId
-    });
-
-    await push(scansRef, {
-      quantity: f.Quantity, remQuantity: f.RemQuantity,
-      itemCode: f.ItemCode, desc: f.Desc, lot: f.Lot,
-      manualLot: f.ManualLot, location: globalLocation,
-      department: globalDepartment, createdUser: globalUser,
-      empId: globalEmpId, raw: f.Raw, time: new Date().toISOString()
-    });
-
-    addRowToTable(no, f, time, globalLocation, globalDepartment, globalUser, globalEmpId);
-    if (navigator.vibrate) navigator.vibrate(150);
-    closePopup();
-    hideLoader();
-  };
-
-  function addRowToTable(no, f, time, loc, dept, user, empId) {
-    const tr = document.createElement("tr");
-    tr.innerHTML = `
-      <td>${no}</td><td>${f.Quantity}</td><td>${f.RemQuantity}</td>
-      <td>${f.ItemCode}</td><td>${f.Desc}</td><td>${f.Lot}</td>
-      <td>${f.ManualLot}</td><td>${loc}</td><td>${dept}</td>
-      <td>${user}</td><td>${empId}</td><td>${time}</td>`;
-    document.querySelector("#tbl tbody").appendChild(tr);
-  }
-
-  function exportExcel() {
-    const ws = XLSX.utils.json_to_sheet(data);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, "Scans");
-    XLSX.writeFile(wb, "ScannedData.xlsx");
-  }
-
-  async function loadScansFromFirebase() {
-    document.querySelector("#tbl tbody").innerHTML = "";
-    data = [];
-    duplicate = new Map();
-    const snapshot = await get(scansRef);
-    if (!snapshot.exists()) return;
-    snapshot.forEach(child => {
-      const d = child.val();
-      const f = {
-        Quantity: d.quantity||"", RemQuantity: d.remQuantity||"",
-        ItemCode: d.itemCode||"", Desc: d.desc||"",
-        Lot: d.lot||"", ManualLot: d.manualLot||"", Raw: d.raw||""
+      const row = {
+        No: data.length+1, Quantity: f.Quantity, "Rem.Quantity": f.RemQuantity, "Item Code": f.ItemCode,
+        Desc: f.Desc, Lot: f.Lot, "Manual Lot": f.ManualLot, Location: globalLocation, Department: globalDepartment,
+        "Created User": globalUser, "Emp ID": globalEmpId, DateTime: new Date(time).toLocaleString(),
+        IP: ip, Device: device, Browser: browser
       };
-      const key = dupKey(f);
-      if (!duplicate.has(key)) {
-        duplicate.set(key, {
-          ...f, Location: d.location||"", Department: d.department||"",
-          CreatedUser: d.createdUser||"", EmpId: d.empId||""
-        });
-        const time = new Date(d.time).toLocaleString();
-        const no   = data.length + 1;
-        data.push({
-          No: no, Quantity: f.Quantity, "Rem.Quantity": f.RemQuantity,
-          "Item Code": f.ItemCode, Desc: f.Desc, Lot: f.Lot,
-          "Manual Lot": f.ManualLot, Location: d.location||"",
-          Department: d.department||"", "Created User": d.createdUser||"",
-          "Emp ID": d.empId||"", DateTime: time
-        });
-        addRowToTable(no, f, time, d.location||"", d.department||"", d.createdUser||"", d.empId||"");
-      }
+      data.push(row);
+      duplicate.set(key, { ...f, Location: globalLocation, Department: globalDepartment, CreatedUser: globalUser, EmpId: globalEmpId });
+
+      await push(scansRef, {
+        quantity: f.Quantity, remQuantity: f.RemQuantity, itemCode: f.ItemCode, desc: f.Desc, lot: f.Lot,
+        manualLot: f.ManualLot, location: globalLocation, department: globalDepartment, createdUser: globalUser,
+        empId: globalEmpId, raw: f.Raw, time: time, ip, device, browser
+      });
+
+      addRowToTable(row.No, f, row.DateTime, globalLocation, globalDepartment, globalUser, globalEmpId, ip, device, browser);
+      playBeep(800,150); doVibrate(100);
+      window.closePopup(); hideLoader();
+      window.filterTable('user-search', 'tbl');
+    };
+
+    function addRowToTable(no, f, time, loc, dept, user, empId, ip, device, browser) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td>${no}</td><td>${f.Quantity}</td><td>${f.RemQuantity}</td><td>${f.ItemCode}</td><td>${f.Desc}</td>
+        <td>${f.Lot}</td><td>${f.ManualLot}</td><td>${loc}</td><td>${dept}</td><td>${user}</td><td>${empId}</td>
+        <td>${time}</td><td>${ip}</td><td>${device}</td><td>${browser}</td>`;
+      document.querySelector("#tbl tbody").appendChild(tr);
+    }
+
+    window.exportExcel = function() {
+      const userData = data.filter(row => row["Emp ID"] === globalEmpId);
+      if (userData.length === 0) { alert("No personal scans to export."); return; }
+      const ws = XLSX.utils.json_to_sheet(userData);
+      const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, "MyScans");
+      XLSX.writeFile(wb, "My_Scanned_Data.xlsx");
+    };
+
+    async function loadScansFromFirebase() {
+      document.querySelector("#tbl tbody").innerHTML = ""; data = []; duplicate = new Map();
+      const snapshot = await get(scansRef);
+      if (!snapshot.exists()) return;
+
+      // Use per-user canSeeAll flag
+      const canSeeAll = currentUserCanSeeAll || false;
+      snapshot.forEach(child => {
+        const d = child.val();
+        if (!canSeeAll && currentSettings.userViewMode === 'own' && d.empId !== globalEmpId) {
+          duplicate.set(dupKey({ItemCode: d.itemCode||"", Lot: d.lot||""}), {
+            ...d, CreatedUser: d.createdUser||"", EmpId: d.empId||"", Location: d.location||"", Department: d.department||""
+          });
+          return;
+        }
+        const f = { Quantity: d.quantity||"", RemQuantity: d.remQuantity||"", ItemCode: d.itemCode||"", Desc: d.desc||"", Lot: d.lot||"", ManualLot: d.manualLot||"", Raw: d.raw||"" };
+        const key = dupKey(f);
+        if (!duplicate.has(key) || currentSettings.allowDuplicate) {
+          duplicate.set(key, { ...f, Location: d.location||"", Department: d.department||"", CreatedUser: d.createdUser||"", EmpId: d.empId||"" });
+          const time = new Date(d.time).toLocaleString(), no = data.length + 1;
+          data.push({ No: no, Quantity: f.Quantity, "Rem.Quantity": f.RemQuantity, "Item Code": f.ItemCode, Desc: f.Desc, Lot: f.Lot,
+            "Manual Lot": f.ManualLot, Location: d.location||"", Department: d.department||"", "Created User": d.createdUser||"", "Emp ID": d.empId||"", DateTime: time,
+            IP: d.ip||"", Device: d.device||"", Browser: d.browser||"" });
+          addRowToTable(no, f, time, d.location||"", d.department||"", d.createdUser||"", d.empId||"", d.ip||"", d.device||"", d.browser||"");
+        }
+      });
+    }
+
+    // ─── USER DASHBOARD ──────────────────────────────────────────
+    function openUserDashboard() {
+      showScreen("screen-dashboard");
+      loadDashboardData();
+    }
+    window.openUserDashboard = openUserDashboard;
+
+    // ─── INIT ──────────────────────────────────────────────────────
+    window.addEventListener("DOMContentLoaded", () => {
+      showScreen("screen-login");
+      document.getElementById("btn-login").onclick = doLogin;
+      document.getElementById("login-pass").onkeydown = e => { if(e.key==="Enter") doLogin(); };
+      document.getElementById("btn-logout-admin").onclick = async () => {
+        document.getElementById("start").style.display = "block";
+        document.getElementById("stop").style.display = "none";
+        await releaseCamera();
+        showScreen("screen-login");
+      };
+      document.getElementById("btn-go-session-admin").onclick = openSessionScreen;
+      document.getElementById("btn-go-session-login").onclick = openSessionScreen;
+      document.getElementById("btn-change").onclick = async () => { await releaseCamera(); openSessionScreen(); };
+      document.getElementById("btn-logout").onclick = async () => { await releaseCamera(); showScreen("screen-login"); };
+      document.getElementById("start").onclick = startCamera;
+      document.getElementById("stop").onclick = stopCamera;
+      document.querySelectorAll(".tab-btn").forEach(btn => { btn.onclick = () => showTab(btn.dataset.tab); });
+      document.getElementById("user-dashboard-btn").onclick = openUserDashboard;
+      document.getElementById("user-dash-back").onclick = () => { showScreen("screen-main"); };
     });
-  }
 
-  // ═══ INIT ════════════════════════════════════════════════════
-  window.addEventListener("DOMContentLoaded", () => {
-    showScreen("screen-login");
+    window.addEventListener("beforeunload", async () => { await releaseCamera(); });
+    document.addEventListener("visibilitychange", async () => { if (document.hidden) await releaseCamera(); });
 
-    document.getElementById("btn-login").onclick        = doLogin;
-    document.getElementById("login-pass").onkeydown     = e => { if(e.key==="Enter") doLogin(); };
-    document.getElementById("btn-logout-admin").onclick = () => showScreen("screen-login");
-    document.getElementById("btn-go-session-admin").onclick = openSessionScreen;
-    document.getElementById("btn-go-session-login").onclick = openSessionScreen;
-    document.getElementById("btn-change").onclick       = openSessionScreen;
-    document.getElementById("btn-logout").onclick       = () => showScreen("screen-login");
-    document.getElementById("start").onclick            = startCamera;
-    document.getElementById("stop").onclick             = stopCamera;
-    document.getElementById("export").onclick           = exportExcel;
-    document.getElementById("btn-save").onclick         = saveRecord;
-    document.getElementById("btn-close").onclick        = closePopup;
-    document.getElementById("btn-close2").onclick       = closePopup;
+    // Expose
+    window.doLogin = doLogin; window.startCamera = startCamera; window.stopCamera = stopCamera;
+    window.releaseCamera = releaseCamera; window.openSessionScreen = openSessionScreen;
+    window.confirmSession = confirmSession; window.saveRecord = saveRecord;
+    window.closePopup = closePopup; window.exportExcel = exportExcel;
+    window.loadMasterData = loadMasterData; window.renderAll = renderAll;
+    window.renderLocations = renderLocations; window.renderDepartments = renderDepartments;
+    window.renderEmployees = renderEmployees; window.renderDrums = renderDrums;
+    window.refreshEmpDeptDropdown = refreshEmpDeptDropdown; window.updateSettings = updateSettings;
+    window.toggleEmployeeStatus = toggleEmployeeStatus; window.toggleCanSeeAll = toggleCanSeeAll;
+    window.addLocation = addLocation; window.deleteLocation = deleteLocation;
+    window.addDepartment = addDepartment; window.deleteDepartment = deleteDepartment;
+    window.addEmployee = addEmployee; window.deleteEmployee = deleteEmployee;
+    window.toggleSelectAllDrums = toggleSelectAllDrums; window.deleteDrum = deleteDrum;
+    window.deleteSelectedDrums = deleteSelectedDrums; window.exportAdminExcel = exportAdminExcel;
+    window.showTab = showTab; window.filterTable = filterTable; window.filterDivList = filterDivList;
+    window.loadDashboardData = loadDashboardData; window.openUserDashboard = openUserDashboard;
+  </script>
 
-    document.querySelectorAll(".tab-btn").forEach(btn => {
-      btn.onclick = () => showTab(btn.dataset.tab);
-    });
-  });
-</script>
-<style>
-* { box-sizing: border-box; }
-body { font-family: Arial, sans-serif; background: #f0f4f8; margin: 0; padding: 0; }
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: Arial, sans-serif; margin: 0; padding: 0; transition: background 0.3s, color 0.3s; }
+    body.light-theme { background: #f0f4f8; color: #222; }
+    body.dark-theme { background: #1a1a2e; color: #eee; }
 
-.center-screen {
-  min-height: 100vh; align-items: center; justify-content: center;
-  padding: 20px; background: linear-gradient(135deg, #1a73e8, #0d47a1);
-}
-.card {
-  background: white; border-radius: 18px; padding: 30px 28px;
-  width: 100%; max-width: 420px;
-  box-shadow: 0 12px 40px rgba(0,0,0,0.25); text-align: center;
-}
-.card .logo { font-size: 46px; margin-bottom: 6px; }
-.card h2 { margin: 0 0 4px; color: #1a73e8; font-size: 21px; }
-.card p  { color: #888; font-size: 13px; margin: 0 0 20px; }
-.field-label { text-align:left; font-size:13px; font-weight:bold; color:#555; margin:12px 0 4px; }
-input[type=text], input[type=password], input[type=email], select {
-  width:100%; padding:11px 13px; border:1.5px solid #ddd;
-  border-radius:10px; font-size:15px; background:#f9f9f9; outline:none;
-}
-input:focus, select:focus { border-color:#1a73e8; }
-.err-msg { color:#dc3545; font-size:13px; margin-top:8px; min-height:18px; text-align:center; }
-.btn-primary {
-  width:100%; margin-top:16px; padding:13px; background:#1a73e8;
-  color:white; border:none; border-radius:10px; font-size:16px;
-  font-weight:bold; cursor:pointer;
-}
-.btn-primary:hover { background:#1558b0; }
-.btn-secondary {
-  padding:9px 16px; color:white; border:none;
-  border-radius:8px; font-size:13px; cursor:pointer; font-weight:bold;
-}
+    .center-screen { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px; }
+    .light-theme .center-screen { background: linear-gradient(135deg, #1a73e8, #0d47a1); }
+    .dark-theme .center-screen { background: linear-gradient(135deg, #0f0f1f, #1a1a2e); }
 
-/* Admin */
-#screen-admin { background:#f0f4f8; min-height:100vh; }
-.admin-header {
-  background:#1a73e8; color:white; padding:14px 20px;
-  display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px;
-}
-.admin-header h2 { margin:0; font-size:17px; }
-.admin-body { padding:16px; max-width:750px; margin:auto; }
-.tabs { display:flex; gap:8px; margin-bottom:16px; flex-wrap:wrap; }
-.tab-btn {
-  padding:9px 20px; border:none; border-radius:20px; font-size:14px;
-  font-weight:bold; cursor:pointer; background:#e0e7ff; color:#1a73e8; transition:all 0.2s;
-}
-.tab-btn.active { background:#1a73e8; color:white; }
-.admin-section {
-  background:white; border-radius:12px; padding:18px;
-  margin-bottom:14px; box-shadow:0 2px 8px rgba(0,0,0,0.06);
-}
-.admin-section h3 { margin:0 0 14px; color:#333; font-size:15px; border-bottom:1px solid #eee; padding-bottom:10px; }
-.add-row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
-.add-row input, .add-row select { flex:1; min-width:110px; padding:10px 12px; font-size:14px; }
-.add-row .add-btn {
-  padding:10px 18px; background:#28a745; color:white;
-  border:none; border-radius:8px; font-size:14px; cursor:pointer;
-  font-weight:bold; white-space:nowrap;
-}
-.admin-item {
-  display:flex; align-items:center; justify-content:space-between;
-  padding:10px 14px; border:1px solid #eee; border-radius:8px;
-  margin-top:8px; font-size:13px; background:#fafafa; gap:8px;
-}
-.admin-item span { flex:1; word-break:break-word; }
-.del-btn {
-  background:#dc3545; color:white; border:none;
-  border-radius:6px; padding:6px 12px; cursor:pointer; font-size:12px;
-  white-space:nowrap; font-weight:bold;
-}
+    .card { background: white; border-radius: 18px; padding: 30px 28px; width: 100%; max-width: 420px; box-shadow: 0 12px 40px rgba(0,0,0,0.25); text-align: center; }
+    .dark-theme .card { background: #2a2a3e; color: #eee; }
+    .dark-theme .card input, .dark-theme .card select { background: #3a3a4e; color: #eee; border-color: #555; }
+    .dark-theme .card .field-label { color: #aaa; }
 
-/* Session */
-#screen-session { display:none; }
+    .card .logo { font-size: 46px; margin-bottom: 6px; }
+    .card h2 { margin: 0 0 4px; color: #1a73e8; }
+    .dark-theme .card h2 { color: #4a8df7; }
+    .card p  { color: #888; font-size: 13px; margin: 0 0 20px; }
+    .field-label { text-align:left; font-size:13px; font-weight:bold; color:#555; margin:12px 0 4px; }
+    input[type=text], input[type=password], input[type=email], select { width:100%; padding:11px 13px; border:1.5px solid #ddd; border-radius:10px; font-size:15px; background:#f9f9f9; outline:none; }
+    input:focus, select:focus { border-color:#1a73e8; }
+    .search-bar { border-radius: 20px; padding: 10px 15px; border: 1px solid #ccc; width: 100%; max-width: 300px; font-size: 14px; margin-bottom:10px; }
+    .err-msg { color:#dc3545; font-size:13px; margin-top:8px; min-height:18px; text-align:center; }
+    .btn-primary { width:100%; margin-top:16px; padding:13px; background:#1a73e8; color:white; border:none; border-radius:10px; font-size:16px; font-weight:bold; cursor:pointer; }
+    .btn-primary:hover { background:#1558b0; }
+    .btn-secondary { padding:9px 16px; color:white; border:none; border-radius:8px; font-size:13px; cursor:pointer; font-weight:bold; }
 
-/* Main */
-#screen-main { padding:14px; background:#f0f4f8; min-height:100vh; }
-.top-bar {
-  display:flex; align-items:center; background:#1a73e8; color:white;
-  border-radius:12px; padding:10px 14px; margin-bottom:14px;
-  gap:8px; flex-wrap:wrap;
-}
-.top-bar h2 { margin:0; font-size:14px; flex:1; min-width:80px; }
-.badge {
-  background:rgba(255,255,255,0.2); border-radius:20px;
-  padding:5px 11px; font-size:12px; font-weight:bold; white-space:nowrap;
-}
-#btn-change, #btn-logout {
-  border:none; border-radius:20px; padding:6px 12px;
-  font-size:12px; font-weight:bold; cursor:pointer;
-}
-#btn-change { background:white; color:#1a73e8; }
-#btn-logout { background:#ff5722; color:white; }
-#reader { width:100%; max-width:450px; margin:auto; border:2px solid #1a73e8; border-radius:8px; }
-.buttons { margin:14px 0; display:flex; gap:10px; }
-.buttons button { flex:1; padding:12px; border:none; border-radius:8px; color:white; font-size:14px; font-weight:bold; cursor:pointer; }
-#start  { background:#28a745; }
-#stop   { background:#dc3545; }
-#export { background:#007bff; }
-.tbl-wrap { overflow-x:auto; margin-top:8px; }
-table { width:100%; border-collapse:collapse; background:white; min-width:1000px; }
-th,td { border:1px solid #e0e0e0; padding:8px; text-align:center; font-size:12px; }
-th { background:#1a73e8; color:white; position:sticky; top:0; }
-tr:nth-child(even) { background:#f5f8ff; }
+    #screen-admin { min-height:100vh; }
+    .light-theme #screen-admin { background:#f0f4f8; }
+    .dark-theme #screen-admin { background:#1a1a2e; }
 
-/* Popup */
-#popup-overlay {
-  display:none; position:fixed; inset:0; background:rgba(0,0,0,0.55);
-  z-index:9999; align-items:center; justify-content:center; padding:15px;
-}
-.popup {
-  background:white; border-radius:16px; width:100%; max-width:420px;
-  overflow:hidden; box-shadow:0 8px 30px rgba(0,0,0,0.3); animation:popIn 0.25s ease;
-}
-@keyframes popIn { from{transform:scale(0.85);opacity:0} to{transform:scale(1);opacity:1} }
-#pop-title { color:white; font-size:17px; font-weight:bold; padding:15px 20px; text-align:center; }
-.pop-body  { padding:14px 20px; max-height:65vh; overflow-y:auto; }
-#pop-status { font-size:13px; font-weight:bold; margin-bottom:10px; text-align:center; }
-.pop-row {
-  display:flex; justify-content:space-between; align-items:flex-start;
-  border-bottom:1px solid #f0f0f0; padding:7px 0; font-size:13px; gap:8px;
-}
-.pop-row .lbl { color:#888; font-weight:bold; min-width:90px; flex-shrink:0; }
-.pop-row .val { color:#222; text-align:right; word-break:break-all; }
-.pop-row .val.hi { color:#1a73e8; font-weight:bold; }
-#pop-err { color:#dc3545; font-size:13px; margin-top:6px; text-align:center; }
-.pop-footer { display:flex; gap:10px; padding:12px 20px 14px; }
-.pop-footer button { flex:1; padding:11px; border:none; border-radius:8px; font-size:14px; font-weight:bold; cursor:pointer; color:white; }
-#btn-save   { background:#28a745; }
-#btn-close  { background:#6c757d; }
-#btn-close2 { background:#6c757d; }
+    .admin-header { background:#1a73e8; color:white; padding:14px 20px; display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px; }
+    .admin-header h2 { margin:0; font-size:17px; }
+    .admin-body { padding:16px; max-width:1000px; margin:auto; }
+    .tabs { display:flex; gap:8px; margin-bottom:16px; flex-wrap:wrap; }
+    .tab-btn { padding:9px 20px; border:none; border-radius:20px; font-size:14px; font-weight:bold; cursor:pointer; transition:all 0.2s; }
+    .light-theme .tab-btn { background:#e0e7ff; color:#1a73e8; }
+    .dark-theme .tab-btn { background:#2a2a4e; color:#4a8df7; }
+    .tab-btn.active { background:#1a73e8; color:white; }
+    .admin-section { border-radius:12px; padding:18px; margin-bottom:14px; box-shadow:0 2px 8px rgba(0,0,0,0.06); }
+    .light-theme .admin-section { background:white; }
+    .dark-theme .admin-section { background:#2a2a3e; }
+    .admin-section h3 { margin:0 0 14px; border-bottom:1px solid #eee; padding-bottom:10px; }
+    .dark-theme .admin-section h3 { border-bottom-color:#444; }
+    .add-row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+    .add-row input, .add-row select { flex:1; min-width:110px; padding:10px 12px; font-size:14px; }
+    .add-row .add-btn { padding:10px 18px; background:#28a745; color:white; border:none; border-radius:8px; font-size:14px; cursor:pointer; font-weight:bold; white-space:nowrap; }
+    .admin-item { display:flex; align-items:center; justify-content:space-between; padding:10px 14px; border:1px solid #eee; border-radius:8px; margin-top:8px; font-size:13px; gap:8px; flex-wrap:wrap; }
+    .light-theme .admin-item { background:#fafafa; border-color:#eee; }
+    .dark-theme .admin-item { background:#3a3a4e; border-color:#444; }
+    .del-btn { background:#dc3545; color:white; border:none; border-radius:6px; padding:6px 12px; cursor:pointer; font-size:12px; white-space:nowrap; font-weight:bold; }
 
-/* Loader */
-#loader-overlay {
-  display: none; position: fixed; inset: 0; background: rgba(255,255,255,0.7);
-  z-index: 10000; align-items: center; justify-content: center; backdrop-filter: blur(2px);
-}
-.spinner {
-  width: 50px; height: 50px; border: 5px solid #e0e0e0;
-  border-top: 5px solid #1a73e8; border-radius: 50%;
-  animation: spin 1s linear infinite;
-}
-@keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
-</style>
+    #screen-main { padding:14px; min-height:100vh; }
+    .light-theme #screen-main { background:#f0f4f8; }
+    .dark-theme #screen-main { background:#1a1a2e; }
+
+    .top-bar { display:flex; align-items:center; background:#1a73e8; color:white; border-radius:12px; padding:10px 14px; margin-bottom:14px; gap:8px; flex-wrap:wrap; }
+    .top-bar h2 { margin:0; font-size:14px; flex:1; min-width:80px; }
+    .badge { background:rgba(255,255,255,0.2); border-radius:20px; padding:5px 11px; font-size:12px; font-weight:bold; white-space:nowrap; }
+    #btn-change, #btn-logout, #user-dashboard-btn { border:none; border-radius:20px; padding:6px 12px; font-size:12px; font-weight:bold; cursor:pointer; }
+    #btn-change { background:white; color:#1a73e8; }
+    #btn-logout { background:#ff5722; color:white; }
+    #user-dashboard-btn { background:#28a745; color:white; }
+    #reader { width:100%; max-width:450px; margin:auto; border:2px solid #1a73e8; border-radius:8px; }
+    .buttons { margin:14px 0; display:flex; gap:10px; flex-wrap:wrap; }
+    .buttons button { flex:1; min-width:120px; padding:12px; border:none; border-radius:8px; color:white; font-size:14px; font-weight:bold; cursor:pointer; }
+    .tbl-wrap { overflow-x:auto; margin-top:8px; border:1px solid #e0e0e0; border-radius:8px; }
+    .dark-theme .tbl-wrap { border-color:#444; }
+    table { width:100%; border-collapse:collapse; background:white; min-width:1000px; }
+    .dark-theme table { background:#2a2a3e; }
+    th,td { border:1px solid #e0e0e0; padding:6px; text-align:center; font-size:11px; }
+    .dark-theme th, .dark-theme td { border-color:#444; color:#eee; }
+    th { background:#1a73e8; color:white; position:sticky; top:0; }
+    tr:nth-child(even) { background:#f5f8ff; }
+    .dark-theme tr:nth-child(even) { background:#2f2f4a; }
+
+    #popup-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.55); z-index:9999; align-items:center; justify-content:center; padding:15px; }
+    .popup { background:white; border-radius:16px; width:100%; max-width:420px; overflow:hidden; box-shadow:0 8px 30px rgba(0,0,0,0.3); animation:popIn 0.25s ease; }
+    .dark-theme .popup { background:#2a2a3e; }
+    .popup .pop-row .val { color:#222; }
+    .dark-theme .popup .pop-row .val { color:#eee; }
+    @keyframes popIn { from{transform:scale(0.85);opacity:0} to{transform:scale(1);opacity:1} }
+    #pop-title { color:white; font-size:17px; font-weight:bold; padding:15px 20px; text-align:center; }
+    .pop-body  { padding:14px 20px; max-height:65vh; overflow-y:auto; }
+    .pop-row { display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f0f0f0; padding:7px 0; font-size:13px; gap:8px; }
+    .dark-theme .pop-row { border-bottom-color:#444; }
+    .pop-row .lbl { color:#888; font-weight:bold; min-width:90px; flex-shrink:0; }
+    .pop-row .val { word-break:break-all; }
+    .pop-footer { display:flex; gap:10px; padding:12px 20px 14px; }
+    .pop-footer button { flex:1; padding:11px; border:none; border-radius:8px; font-size:14px; font-weight:bold; cursor:pointer; color:white; }
+
+    #loader-overlay { display: none; position: fixed; inset: 0; background: rgba(255,255,255,0.7); z-index: 10000; align-items: center; justify-content: center; backdrop-filter: blur(2px); }
+    .dark-theme #loader-overlay { background: rgba(0,0,0,0.7); }
+    .spinner { width: 50px; height: 50px; border: 5px solid #e0e0e0; border-top: 5px solid #1a73e8; border-radius: 50%; animation: spin 1s linear infinite; }
+    @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+
+    .dash-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 15px; margin-bottom: 20px; }
+    .dash-card { background: white; padding: 15px; border-radius: 12px; text-align: center; box-shadow: 0 2px 6px rgba(0,0,0,0.06); }
+    .dark-theme .dash-card { background: #2a2a3e; }
+    .dash-card .num { font-size: 28px; font-weight: bold; color: #1a73e8; }
+    .dash-card .label { font-size: 12px; color: #888; }
+    .chart-row { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px; }
+    .chart-box { background: white; padding: 15px; border-radius: 12px; box-shadow: 0 2px 6px rgba(0,0,0,0.06); }
+    .dark-theme .chart-box { background: #2a2a3e; }
+    .chart-box canvas { max-height: 200px; max-width: 100%; }
+    @media(max-width:768px){ .chart-row { grid-template-columns: 1fr; } }
+
+    .company-logo { width:55px; height:55px; border-radius:50%; background:white; padding:3px; object-fit:cover; }
+    .company-name { display:flex; flex-direction:column; }
+    .company-name h2 { margin:0; font-size:18px; }
+    .company-name span { font-size:11px; }
+    .top-bar .badge { margin:2px; }
+
+    #screen-dashboard { padding:14px; min-height:100vh; }
+    .light-theme #screen-dashboard { background:#f0f4f8; }
+    .dark-theme #screen-dashboard { background:#1a1a2e; }
+  </style>
 </head>
 <body>
 
-<div id="loader-overlay">
-  <div class="spinner"></div>
-</div>
+<div id="loader-overlay"><div class="spinner"></div></div>
 
+<!-- LOGIN -->
 <div id="screen-login" class="center-screen" style="display:flex">
   <div class="card">
-    <div class="logo">🔐</div>
-    <h2>QR & Barcode Scanner</h2>
-    <p>Admin login or continue as user</p>
-    <div class="field-label">📧 Username</div>
-    <input type="email" id="login-user" placeholder="Admin@QRscan.com">
-    <div class="field-label">🔑 Password</div>
-    <input type="password" id="login-pass" placeholder="Password">
+    <div class="logo">🔐</div><h2>QR Scanner Pro</h2><p>Admin or User</p>
+    <div class="field-label">📧 Username</div><input type="email" id="login-user" placeholder="Admin@QRscan.com">
+    <div class="field-label">🔑 Password</div><input type="password" id="login-pass" placeholder="Password">
     <div class="err-msg" id="login-err"></div>
-    <button class="btn-primary" id="btn-login">🔐 Login as Admin</button>
+    <button class="btn-primary" id="btn-login">🔐 Admin Login</button>
     <hr style="margin:18px 0;border:none;border-top:1px solid #eee">
-    <button class="btn-primary" id="btn-go-session-login"
-      style="background:#28a745;margin-top:0">📷 Continue as User →</button>
+    <button class="btn-primary" id="btn-go-session-login" style="background:#28a745;margin-top:0">📷 Continue as User →</button>
   </div>
 </div>
 
+<!-- ADMIN -->
 <div id="screen-admin" style="display:none">
   <div class="admin-header">
     <h2>🛠 Admin Panel</h2>
     <div style="display:flex;gap:8px;flex-wrap:wrap">
-      <button class="btn-secondary" id="btn-go-session-admin" style="background:#28a745">📷 Go to Scanner</button>
+      <button class="btn-secondary" id="btn-go-session-admin" style="background:#28a745">📷 Scanner</button>
       <button class="btn-secondary" id="btn-logout-admin" style="background:#dc3545">🚪 Logout</button>
     </div>
   </div>
@@ -680,118 +834,229 @@ tr:nth-child(even) { background:#f5f8ff; }
       <button class="tab-btn active" data-tab="locations">📍 Locations</button>
       <button class="tab-btn" data-tab="departments">🏢 Departments</button>
       <button class="tab-btn" data-tab="employees">👤 Employees</button>
+      <button class="tab-btn" data-tab="drums">🛢️ Drums</button>
+      <button class="tab-btn" data-tab="dashboard">📊 Dashboard</button>
+      <button class="tab-btn" data-tab="settings">⚙️ Settings</button>
     </div>
 
     <div id="tab-locations">
-      <div class="admin-section">
-        <h3>📍 Manage Locations</h3>
-        <div class="add-row">
-          <input type="text" id="new-loc" placeholder="e.g. EHV, LT, LT1">
-          <button class="add-btn" onclick="addLocation()">➕ Add</button>
-        </div>
-        <div class="err-msg" id="loc-err" style="text-align:left"></div>
-        <div id="admin-loc-list" style="margin-top:10px"></div>
+      <div class="admin-section"><h3>📍 Locations</h3>
+        <div class="add-row"><input type="text" id="new-loc" placeholder="e.g. EHV, LT"><button class="add-btn" onclick="addLocation()">➕ Add</button></div>
+        <input type="text" id="admin-loc-search" class="search-bar" placeholder="🔍 Search..." onkeyup="filterDivList('admin-loc-search','admin-loc-list')">
+        <div id="admin-loc-list"></div>
       </div>
     </div>
 
     <div id="tab-departments" style="display:none">
-      <div class="admin-section">
-        <h3>🏢 Manage Departments</h3>
-        <div class="add-row">
-          <input type="text" id="new-dept" placeholder="e.g. Production, QA">
-          <button class="add-btn" onclick="addDepartment()">➕ Add</button>
-        </div>
-        <div class="err-msg" id="dept-err" style="text-align:left"></div>
-        <div id="admin-dept-list" style="margin-top:10px"></div>
+      <div class="admin-section"><h3>🏢 Departments</h3>
+        <div class="add-row"><input type="text" id="new-dept" placeholder="e.g. Production"><button class="add-btn" onclick="addDepartment()">➕ Add</button></div>
+        <input type="text" id="admin-dept-search" class="search-bar" placeholder="🔍 Search..." onkeyup="filterDivList('admin-dept-search','admin-dept-list')">
+        <div id="admin-dept-list"></div>
       </div>
     </div>
 
     <div id="tab-employees" style="display:none">
-      <div class="admin-section">
-        <h3>👤 Manage Employees</h3>
+      <div class="admin-section"><h3>👤 Employees</h3>
         <div class="add-row">
           <input type="text" id="new-emp-name" placeholder="Full Name">
-          <input type="text" id="new-emp-id"   placeholder="Employee ID">
-          <select id="new-emp-dept"><option value="">-- Department --</option></select>
+          <input type="text" id="new-emp-id" placeholder="Employee ID">
+          <select id="new-emp-dept"><option value="">-- Dept --</option></select>
           <button class="add-btn" onclick="addEmployee()">➕ Add</button>
         </div>
         <div class="err-msg" id="admin-emp-err" style="text-align:left"></div>
-        <div id="admin-emp-list" style="margin-top:10px"></div>
+        <input type="text" id="admin-emp-search" class="search-bar" placeholder="🔍 Search..." onkeyup="filterDivList('admin-emp-search','admin-emp-list')">
+        <div id="admin-emp-list"></div>
+      </div>
+    </div>
+
+    <div id="tab-drums" style="display:none">
+      <div class="admin-section">
+        <div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:14px;border-bottom:1px solid #eee;padding-bottom:10px;">
+          <h3 style="margin:0;border:none;padding:0;">🛢️ Scans</h3>
+          <div style="display:flex;gap:8px;">
+            <button class="del-btn" onclick="exportAdminExcel()" style="background:#007bff;">📥 Export</button>
+            <button class="del-btn" onclick="deleteSelectedDrums()" style="background:#ff5722;">🗑 Bulk</button>
+          </div>
+        </div>
+        <input type="text" id="admin-search" class="search-bar" placeholder="🔍 Search..." onkeyup="filterTable('admin-search','admin-drums-tbl')">
+        <div class="tbl-wrap" style="max-height:400px;overflow-y:auto;">
+          <table id="admin-drums-tbl" style="min-width:700px;">
+            <thead><tr><th><input type="checkbox" id="select-all-drums" onchange="toggleSelectAllDrums(this)"></th>
+              <th>Item</th><th>Lot</th><th>Qty</th><th>Location</th><th>User</th><th>Date</th><th>Action</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <div id="tab-dashboard" style="display:none">
+      <div class="admin-section">
+        <h3>📊 Dashboard</h3>
+        <div class="dash-grid">
+          <div class="dash-card"><div class="num" id="dash-today">0</div><div class="label">Today's Scans</div></div>
+          <div class="dash-card"><div class="num" id="dash-users">0</div><div class="label">Total Users</div></div>
+          <div class="dash-card"><div class="num" id="dash-locations">0</div><div class="label">Total Locations</div></div>
+          <div class="dash-card"><div class="num" id="dash-departments">0</div><div class="label">Total Departments</div></div>
+          <div class="dash-card"><div class="num" id="dash-top-emp">-</div><div class="label">Most Active Employee</div></div>
+          <div class="dash-card"><div class="num" id="dash-top-dept">-</div><div class="label">Most Active Dept</div></div>
+          <div class="dash-card"><div class="num" id="dash-top-loc">-</div><div class="label">Most Active Location</div></div>
+        </div>
+        <div class="chart-row">
+          <div class="chart-box"><canvas id="chart-daily"></canvas><div style="text-align:center;font-size:12px;color:#888;">Daily Scan Trend</div></div>
+          <div class="chart-box"><canvas id="chart-user"></canvas><div style="text-align:center;font-size:12px;color:#888;">User Wise Scans</div></div>
+        </div>
+        <div class="chart-row">
+          <div class="chart-box"><canvas id="chart-loc"></canvas><div style="text-align:center;font-size:12px;color:#888;">Location Wise</div></div>
+          <div class="chart-box" style="display:flex;align-items:center;justify-content:center;color:#888;font-size:14px;">📊 Real-time insights</div>
+        </div>
+      </div>
+    </div>
+
+    <div id="tab-settings" style="display:none">
+      <div class="admin-section">
+        <h3>⚙️ Settings</h3>
+        <div style="display:flex;flex-direction:column;gap:12px;">
+          <div><label style="font-weight:bold;">User Table Visibility</label>
+            <select id="set-viewmode" style="display:block;margin-top:4px;max-width:300px;">
+              <option value="all">See ALL company scans</option>
+              <option value="own">See ONLY own scans</option>
+            </select>
+          </div>
+          <div><label style="font-weight:bold;">Allow Duplicate Scan</label>
+            <div><input type="radio" id="dup-yes" name="dup" value="yes"> <label for="dup-yes">Yes</label>
+            <input type="radio" id="dup-no" name="dup" value="no" checked> <label for="dup-no">No</label></div>
+          </div>
+          <div><label>Success Sound</label> <input type="checkbox" id="set-success-sound" checked> Enable</div>
+          <div><label>Error Sound</label> <input type="checkbox" id="set-error-sound" checked> Enable</div>
+          <div><label>Vibration</label> <input type="checkbox" id="set-vibration" checked> Enable</div>
+          <div><label>Theme</label>
+            <select id="set-theme"><option value="light">☀️ Light</option><option value="dark" selected>🌙 Dark</option></select>
+          </div>
+          <div><label>Delay Between Scans</label>
+            <select id="set-scan-delay"><option value="3">3s</option><option value="5">5s</option><option value="10">10s</option></select>
+          </div>
+          <button class="add-btn" onclick="updateSettings()" style="max-width:200px;">💾 Save</button>
+          <div id="set-msg" style="color:#28a745;font-weight:bold;display:none;">✅ Saved!</div>
+        </div>
       </div>
     </div>
   </div>
 </div>
 
+<!-- SESSION -->
 <div id="screen-session" class="center-screen" style="display:none">
   <div class="card">
-    <div class="logo">📷</div>
-    <h2>Start Scanning Session</h2>
-    <p>Verify your identity to continue</p>
-    <div class="field-label">📍 Location</div>
-    <select id="sess-location"></select>
-    <div class="field-label">🏢 Department</div>
-    <select id="sess-department"></select>
-    <div class="field-label">🪪 Employee ID</div>
-    <input type="text" id="sess-empid" placeholder="Enter your Employee ID">
+    <div class="logo">📷</div><h2>Start Session</h2>
+    <div class="field-label">📍 Location</div><select id="sess-location"></select>
+    <div class="field-label">🏢 Department</div><select id="sess-department"></select>
+    <div class="field-label">🪪 Employee ID</div><input type="text" id="sess-empid" placeholder="Enter Employee ID">
     <div class="err-msg" id="sess-err"></div>
-    <button class="btn-primary" onclick="confirmSession()">✅ Verify & Start →</button>
-    <button class="btn-primary" onclick="showScreen('screen-login')"
-      style="background:#6c757d;margin-top:8px">← Back</button>
+    <button class="btn-primary" onclick="confirmSession()">✅ Verify & Start</button>
+    <button class="btn-primary" onclick="showScreen('screen-login')" style="background:#6c757d;margin-top:8px">← Back</button>
   </div>
 </div>
 
+<!-- MAIN SCANNER -->
 <div id="screen-main" style="display:none">
-  <div class="top-bar">
-    <h2>📷 QR Scanner</h2>
-    <span class="badge" id="badge-location">📍 -</span>
-    <span class="badge" id="badge-dept">🏢 -</span>
-    <span class="badge" id="badge-user">👤 -</span>
-    <button id="btn-change">✏️ Change</button>
-    <button id="btn-logout">🚪 Exit</button>
+<div class="top-bar">
+  <img class="company-logo" src="https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcTsdGLnVVgR7P3F0FsvF_AnlvruWH8qNLP0ffm8GgXjhA8YUMsds_96Ly2V&s=10">
+  <div class="company-name"><h2>DICABS QR Scanner</h2><span>Diamond Power Infra.</span></div>
+  <span class="badge" id="badge-location">📍 -</span>
+  <span class="badge" id="badge-dept">🏢 -</span>
+  <span class="badge" id="badge-user">👤 -</span>
+  <button id="btn-change">✏️ Change</button>
+  <button id="btn-logout">🚪 Exit</button>
+  <button id="user-dashboard-btn" style="display:none;background:#28a745;color:white;border:none;border-radius:20px;padding:6px 12px;">📊 Dashboard</button>
+</div>
+<div id="reader"></div>
+<div class="buttons">
+  <button id="start" style="background:#28a745">📷 Open Camera</button>
+  <button id="stop" style="background:#dc3545">⏹ Stop</button>
+  <button id="export" style="background:#007bff" onclick="exportExcel()">📥 Export My Session</button>
+</div>
+<input type="text" id="user-search" class="search-bar" placeholder="🔍 Search your scans..." onkeyup="filterTable('user-search','tbl')">
+<div class="tbl-wrap">
+  <table id="tbl">
+    <thead><tr><th>No</th><th>Qty</th><th>Rem.Qty</th><th>Item Code</th><th>Desc</th><th>Lot</th><th>Manual Lot</th><th>Location</th><th>Dept</th><th>User</th><th>Emp ID</th><th>Date</th><th>IP</th><th>Device</th><th>Browser</th></tr></thead>
+    <tbody></tbody>
+  </table>
+</div>
+</div>
+
+<!-- USER DASHBOARD -->
+<div id="screen-dashboard" style="display:none">
+  <div style="background:#1a73e8;color:white;padding:14px 20px;display:flex;justify-content:space-between;align-items:center;">
+    <h2 style="margin:0;">📊 User Dashboard</h2>
+    <button id="user-dash-back" style="background:white;color:#1a73e8;border:none;border-radius:20px;padding:6px 16px;font-weight:bold;cursor:pointer;">← Back</button>
   </div>
-  <div id="reader"></div>
-  <div class="buttons">
-    <button id="start">📷 Open Camera</button>
-    <button id="stop">⏹ Stop</button>
-    <button id="export">📥 Export Excel</button>
-  </div>
-  <div class="tbl-wrap">
-    <table id="tbl">
-      <thead>
-        <tr>
-          <th>No</th><th>Quantity</th><th>Rem.Qty</th><th>Item Code</th>
-          <th>Desc</th><th>Lot</th><th>Manual Lot</th>
-          <th>Location</th><th>Department</th><th>User</th><th>Emp ID</th><th>Date Time</th>
-        </tr>
-      </thead>
-      <tbody></tbody>
-    </table>
+  <div style="padding:16px;max-width:1000px;margin:auto;">
+    <div class="dash-grid">
+      <div class="dash-card"><div class="num" id="dash-today">0</div><div class="label">Today's Scans</div></div>
+      <div class="dash-card"><div class="num" id="dash-users">0</div><div class="label">Total Users</div></div>
+      <div class="dash-card"><div class="num" id="dash-locations">0</div><div class="label">Total Locations</div></div>
+      <div class="dash-card"><div class="num" id="dash-departments">0</div><div class="label">Total Departments</div></div>
+      <div class="dash-card"><div class="num" id="dash-top-emp">-</div><div class="label">Most Active Employee</div></div>
+      <div class="dash-card"><div class="num" id="dash-top-dept">-</div><div class="label">Most Active Dept</div></div>
+      <div class="dash-card"><div class="num" id="dash-top-loc">-</div><div class="label">Most Active Location</div></div>
+    </div>
+    <div class="chart-row">
+      <div class="chart-box"><canvas id="chart-daily"></canvas><div style="text-align:center;font-size:12px;color:#888;">Daily Scan Trend</div></div>
+      <div class="chart-box"><canvas id="chart-user"></canvas><div style="text-align:center;font-size:12px;color:#888;">User Wise Scans</div></div>
+    </div>
+    <div class="chart-row">
+      <div class="chart-box"><canvas id="chart-loc"></canvas><div style="text-align:center;font-size:12px;color:#888;">Location Wise</div></div>
+      <div class="chart-box" style="display:flex;align-items:center;justify-content:center;color:#888;font-size:14px;">📊 Your activity insights</div>
+    </div>
   </div>
 </div>
 
+<!-- POPUP -->
 <div id="popup-overlay">
   <div class="popup">
     <div id="pop-title"></div>
     <div class="pop-body">
       <div id="pop-status"></div>
-      <div class="pop-row"><span class="lbl">Quantity</span>   <span class="val" id="pop-qty"></span></div>
-      <div class="pop-row"><span class="lbl">Rem.Qty</span>    <span class="val" id="pop-remqty"></span></div>
-      <div class="pop-row"><span class="lbl">Item Code</span>  <span class="val" id="pop-code"></span></div>
-      <div class="pop-row"><span class="lbl">Desc</span>       <span class="val" id="pop-desc"></span></div>
-      <div class="pop-row"><span class="lbl">Lot</span>        <span class="val" id="pop-lot"></span></div>
-      <div class="pop-row"><span class="lbl">Manual Lot</span> <span class="val" id="pop-mlot"></span></div>
-      <div class="pop-row"><span class="lbl">📍 Location</span>  <span class="val hi" id="pop-loc-val"></span></div>
-      <div class="pop-row"><span class="lbl">🏢 Department</span><span class="val hi" id="pop-dept-val"></span></div>
-      <div class="pop-row"><span class="lbl">👤 User</span>      <span class="val hi" id="pop-user-val"></span></div>
-      <div id="pop-err"></div>
+      <div class="pop-row"><span class="lbl">Qty</span><span class="val" id="pop-qty"></span></div>
+      <div class="pop-row"><span class="lbl">Rem.Qty</span><span class="val" id="pop-remqty"></span></div>
+      <div class="pop-row"><span class="lbl">Item Code</span><span class="val" id="pop-code"></span></div>
+      <div class="pop-row"><span class="lbl">Desc</span><span class="val" id="pop-desc"></span></div>
+      <div class="pop-row"><span class="lbl">Lot</span><span class="val" id="pop-lot"></span></div>
+      <div class="pop-row"><span class="lbl">Manual Lot</span><span class="val" id="pop-mlot"></span></div>
+      <div class="pop-row"><span class="lbl">📍 Location</span><span class="val" id="pop-loc-val"></span></div>
+      <div class="pop-row"><span class="lbl">🏢 Dept</span><span class="val" id="pop-dept-val"></span></div>
+      <div class="pop-row"><span class="lbl">👤 User</span><span class="val" id="pop-user-val"></span></div>
     </div>
     <div class="pop-footer">
-      <button id="btn-save">✅ Save</button>
-      <button id="btn-close">✖ Cancel</button>
-      <button id="btn-close2">✖ Close</button>
+      <button id="btn-save" style="background:#28a745" onclick="saveRecord()">✅ Save</button>
+      <button id="btn-close" style="background:#6c757d" onclick="closePopup()">✖ Cancel</button>
+      <button id="btn-close2" style="background:#6c757d" onclick="closePopup()">✖ Close</button>
     </div>
   </div>
 </div>
 
+<!-- Hidden checkbox for allow duplicate -->
+<input type="checkbox" id="set-allow-duplicate" style="display:none;">
+
+<script>
+  document.addEventListener('DOMContentLoaded', function() {
+    const dupYes = document.getElementById('dup-yes');
+    const dupNo = document.getElementById('dup-no');
+    if (dupYes && dupNo) {
+      dupYes.addEventListener('change', function() {
+        document.getElementById('set-allow-duplicate').checked = this.checked;
+      });
+      dupNo.addEventListener('change', function() {
+        document.getElementById('set-allow-duplicate').checked = !this.checked;
+      });
+    }
+    const allowDup = document.getElementById('set-allow-duplicate');
+    if (allowDup) {
+      allowDup.addEventListener('change', function() {
+        document.getElementById('dup-yes').checked = this.checked;
+        document.getElementById('dup-no').checked = !this.checked;
+      });
+    }
+  });
+</script>
 </body>
 </html>
