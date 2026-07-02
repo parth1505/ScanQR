@@ -82,6 +82,30 @@
       });
     };
 
+    // ── Firebase Flatten Helpers ──────────────────────────────────
+    function isPlainObject(v) {
+      return v && typeof v === "object" && !Array.isArray(v);
+    }
+
+    function flattenByShape(node, requiredKeys, out, keyHint = "") {
+      if (!node) return;
+      if (Array.isArray(node)) {
+        node.forEach((item, idx) => flattenByShape(item, requiredKeys, out, keyHint ? `${keyHint}-${idx}` : String(idx)));
+        return;
+      }
+      if (!isPlainObject(node)) return;
+
+      const hasAnyKey = requiredKeys.some(k => Object.prototype.hasOwnProperty.call(node, k));
+      if (hasAnyKey) {
+        out.push({ key: keyHint || "", ...node });
+        return;
+      }
+
+      Object.entries(node).forEach(([k, v]) => {
+        flattenByShape(v, requiredKeys, out, k);
+      });
+    }
+
     // ── Load Master Data ──────────────────────────────────────────
     async function loadMasterData() {
       locationsList = []; departmentsList = []; employeesList = [];
@@ -92,11 +116,31 @@
         get(scansRef), get(settingsRef), get(masterRef)
       ]);
 
-      if (locSnap.exists())    locSnap.forEach(c    => locationsList.push({ key: c.key, name: c.val().name }));
-      if (deptSnap.exists())   deptSnap.forEach(c   => departmentsList.push({ key: c.key, name: c.val().name }));
-      if (empSnap.exists())    empSnap.forEach(c    => employeesList.push({ key: c.key, ...c.val() }));
-      if (scansSnap.exists())  scansSnap.forEach(c  => adminDrumsList.push({ key: c.key, ...c.val() }));
-      if (masterSnap.exists()) masterSnap.forEach(c => masterRecordsList.push({ key: c.key, ...c.val() }));
+      if (locSnap.exists()) {
+        const locFlat = [];
+        flattenByShape(locSnap.val(), ["name"], locFlat);
+        locationsList = locFlat.filter(r => r.name);
+      }
+      if (deptSnap.exists()) {
+        const deptFlat = [];
+        flattenByShape(deptSnap.val(), ["name"], deptFlat);
+        departmentsList = deptFlat.filter(r => r.name);
+      }
+      if (empSnap.exists()) {
+        const empFlat = [];
+        flattenByShape(empSnap.val(), ["empId", "department", "name"], empFlat);
+        employeesList = empFlat.filter(r => r.empId || r.name);
+      }
+      if (scansSnap.exists()) {
+        const scanFlat = [];
+        flattenByShape(scansSnap.val(), ["itemCode", "lot", "time", "createdUser"], scanFlat);
+        adminDrumsList = scanFlat.filter(r => r.itemCode || r.lot || r.time);
+      }
+      if (masterSnap.exists()) {
+        const masterFlat = [];
+        flattenByShape(masterSnap.val(), ["itemCode", "lot", "quantity", "desc", "manualLot"], masterFlat);
+        masterRecordsList = masterFlat.filter(r => r.itemCode || r.lot);
+      }
 
       if (setSnap.exists()) {
         currentSettings = { ...currentSettings, ...setSnap.val() };
@@ -830,8 +874,9 @@
       document.querySelector("#tbl tbody").innerHTML=""; data=[]; duplicate=new Map();
       const snapshot=await get(scansRef); if(!snapshot.exists()) return;
       const canSeeAll=currentUserCanSeeAll||false;
-      snapshot.forEach(child=>{
-        const d=child.val();
+      const flatScans = [];
+      flattenByShape(snapshot.val(), ["itemCode", "lot", "time", "createdUser"], flatScans);
+      flatScans.forEach(d=>{
         if(!canSeeAll && currentSettings.userViewMode==='own' && d.empId!==globalEmpId){
           duplicate.set(dupKey({ItemCode:d.itemCode||"",Lot:d.lot||""}),{
             ...d, CreatedUser:d.createdUser||"", EmpId:d.empId||"",
