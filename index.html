@@ -36,7 +36,7 @@
     let data = [], duplicate = new Map(), pendingFields = null;
     let globalLocation = "", globalDepartment = "", globalUser = "", globalEmpId = "";
     let locationsList = [], departmentsList = [], employeesList = [], adminDrumsList = [];
-    let masterRecordsList = []; // From PDF uploads and BC Sync
+    let masterRecordsList = []; // From PDF uploads and Excel import
     let currentUserCanSeeAll = false;
 
     let currentSettings = {
@@ -140,7 +140,7 @@
       const p = document.getElementById("login-pass").value;
       document.getElementById("login-err").textContent = "";
       if (u === "Admin@QRscan.com" && p === "Admin@123") {
-        showLoader(); await loadMasterData(); renderAll(); await loadBCConfig(); hideLoader();
+        showLoader(); await loadMasterData(); renderAll(); hideLoader();
         showScreen("screen-admin"); showTab("locations"); applySettings();
       } else {
         document.getElementById("login-err").textContent = "❌ Invalid credentials.";
@@ -208,7 +208,7 @@
     function renderMasterRecords() {
       const tbody = document.querySelector("#master-tbl tbody"); tbody.innerHTML = "";
       if (!masterRecordsList.length) {
-        tbody.innerHTML = '<tr><td colspan="7" style="color:#aaa;padding:15px;text-align:center">No master records. Upload a PDF or Sync from BC.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="7" style="color:#aaa;padding:15px;text-align:center">No master records. Upload a PDF or import from Excel.</td></tr>';
         return;
       }
       masterRecordsList.forEach(r => {
@@ -403,9 +403,7 @@
       XLSX.utils.book_append_sheet(wb,ws,"AllScans"); XLSX.writeFile(wb,"Admin_All_Scans.xlsx");
     };
 
-    // ── Business Central Sync Logic ────────────────────────────────
-    let bcAvailableKeys = [];
-    let bcFirstRecord = null;
+    // ── Excel Import ───────────────────────────────────────────────
     let excelColumns = [];
     let excelRows = [];
 
@@ -417,94 +415,39 @@
       { key: "manualLot", label: "Manual Lot" }
     ];
 
-    const BC_FIELD_GUESSES = {
-      itemCode: ["itemcode", "itemno", "item_no", "no", "itemnumber", "item"],
+    const EXCEL_FIELD_GUESSES = {
+      itemCode: ["itemcode", "itemno", "item_no", "no", "itemnumber", "item", "item code"],
       lot: ["lot", "lotno", "lot_no", "lotnumber", "serialno", "serial_no"],
-      quantity: ["quantity", "qty", "remainingquantity", "remquantity", "inventory"],
+      quantity: ["quantity", "qty", "remquantity", "remainingquantity"],
       desc: ["desc", "description", "itemdescription", "name"],
-      manualLot: ["manuallot", "manual_lot", "externallotno"]
+      manualLot: ["manuallot", "manual_lot", "manual lot", "externallotno"]
     };
 
-    function normalizeBCUrl(url) {
-      return (url || "").trim().replace(/\/+$/, "") + "/";
-    }
-
-    function formatCompanyId(id) {
-      if (!id) return "";
-      const clean = String(id).replace(/[{}']/g, "").trim();
-      return clean;
-    }
-
-    function getBCBaseUrl() {
-      return normalizeBCUrl(document.getElementById("bc-url").value);
-    }
-
-    function getBCHeaders() {
-      const u = document.getElementById("bc-user").value.trim();
-      const p = document.getElementById("bc-pass").value;
-      const headers = new Headers({ "Accept": "application/json" });
-      if (u && p) headers.append("Authorization", "Basic " + btoa(u + ":" + p));
-      return headers;
-    }
-
-    function filterBCFields(record) {
-      if (!record || typeof record !== "object") return [];
-      return Object.keys(record).filter(k => !k.startsWith("@odata") && !k.startsWith("@"));
-    }
-
-    function buildBCEndpoint(companyId, entity, query) {
-      const base = getBCBaseUrl();
-      const cid = formatCompanyId(companyId);
-      const ent = (entity || "").trim().replace(/^\/+/, "");
-      let url = base + "companies(" + cid + ")/" + ent;
-      if (query) url += (query.startsWith("?") ? "" : "?") + query;
-      return url;
-    }
-
-    async function bcFetch(url) {
-      let res;
-      try {
-        res = await fetch(url, { method: "GET", headers: getBCHeaders(), mode: "cors" });
-      } catch (e) {
-        const msg = e.message || String(e);
-        if (msg.includes("Failed to fetch") || msg.includes("NetworkError")) {
-          throw new Error("Network/CORS blocked. Open this page from http (not file://) and ensure BC allows CORS from your host.");
-        }
-        throw e;
-      }
-      if (!res.ok) {
-        const errText = await res.text().catch(() => "");
-        throw new Error("HTTP " + res.status + (errText ? " — " + errText.substring(0, 120) : ""));
-      }
-      return res.json();
-    }
-
-    function guessBCField(localKey, keys) {
-      const guesses = BC_FIELD_GUESSES[localKey] || [];
-      const lowerMap = {};
-      keys.forEach(k => { lowerMap[k.toLowerCase().replace(/[\s_.]/g, "")] = k; });
-      for (const g of guesses) {
-        if (lowerMap[g]) return lowerMap[g];
+    function guessExcelField(localKey, keys) {
+      const norm = {};
+      keys.forEach(k => { norm[k.toLowerCase().replace(/[\s_.]/g, "")] = k; });
+      for (const g of (EXCEL_FIELD_GUESSES[localKey] || [])) {
+        if (norm[g]) return norm[g];
       }
       return "";
     }
 
-    function populateBCMappingDropdowns(keys, prefix) {
-      const optionsHtml = '<option value="">-- Ignore / Unmapped --</option>' +
+    function populateMappingDropdowns(keys, prefix) {
+      const optionsHtml = '<option value="">-- Ignore --</option>' +
         keys.map(k => '<option value="' + k + '">' + k + '</option>').join("");
       LOCAL_FIELDS.forEach(f => {
-        const el = document.getElementById((prefix || "map-") + f.key);
+        const el = document.getElementById(prefix + f.key);
         if (!el) return;
         el.innerHTML = optionsHtml;
-        const guess = guessBCField(f.key, keys);
+        const guess = guessExcelField(f.key, keys);
         if (guess) el.value = guess;
       });
     }
 
-    function getBCFieldMap(prefix) {
+    function getFieldMap(prefix) {
       const map = {};
       LOCAL_FIELDS.forEach(f => {
-        const el = document.getElementById((prefix || "map-") + f.key);
+        const el = document.getElementById(prefix + f.key);
         map[f.key] = el ? el.value : "";
       });
       return map;
@@ -513,134 +456,10 @@
     function mapRecordWithFields(record, map) {
       const r = { remQuantity: "" };
       LOCAL_FIELDS.forEach(f => {
-        const bcKey = map[f.key];
-        r[f.key] = bcKey && record[bcKey] != null ? String(record[bcKey]) : "";
+        const col = map[f.key];
+        r[f.key] = col && record[col] != null ? String(record[col]) : "";
       });
       return r;
-    }
-
-    function resetBCMappingSections() {
-      document.getElementById("bc-mapping-section").style.display = "none";
-      document.getElementById("bc-record-preview").style.display = "none";
-      document.getElementById("bc-record-preview").textContent = "";
-      bcAvailableKeys = [];
-      bcFirstRecord = null;
-    }
-
-    async function saveBCConfig() {
-      const cfg = {
-        url: document.getElementById("bc-url").value.trim(),
-        user: document.getElementById("bc-user").value.trim(),
-        entity: document.getElementById("bc-entity-name").value.trim(),
-        companyId: document.getElementById("bc-company-select").value,
-        fieldMap: getBCFieldMap("map-")
-      };
-      await update(ref(db, "settings/bcConfig"), cfg);
-    }
-
-    async function loadBCConfig() {
-      const snap = await get(ref(db, "settings/bcConfig"));
-      if (!snap.exists()) return;
-      const cfg = snap.val();
-      if (cfg.url) document.getElementById("bc-url").value = cfg.url;
-      if (cfg.user) document.getElementById("bc-user").value = cfg.user;
-      if (cfg.entity) document.getElementById("bc-entity-name").value = cfg.entity;
-      if (cfg.fieldMap) {
-        LOCAL_FIELDS.forEach(f => {
-          const el = document.getElementById("map-" + f.key);
-          if (el && cfg.fieldMap[f.key]) el.value = cfg.fieldMap[f.key];
-        });
-      }
-    }
-
-    window.onBCCompanyChange = function() {
-      resetBCMappingSections();
-      document.getElementById("bc-status").textContent = "Company changed — fetch fields again for this company.";
-      document.getElementById("bc-status").style.color = "#888";
-    };
-
-    window.loadBCCompanies = async function() {
-      const status = document.getElementById("bc-status");
-      status.textContent = "⏳ Fetching companies from BC...";
-      status.style.color = "#888";
-      showLoader();
-      resetBCMappingSections();
-
-      try {
-        const data = await bcFetch(getBCBaseUrl() + "companies");
-        const companies = data.value || [];
-        const sel = document.getElementById("bc-company-select");
-        sel.innerHTML = '<option value="">-- Select Company --</option>';
-        companies.forEach(c => {
-          const id = formatCompanyId(c.id);
-          sel.innerHTML += '<option value="' + id + '">' + (c.displayName || c.name || id) + '</option>';
-        });
-
-        const savedSnap = await get(ref(db, "settings/bcConfig"));
-        if (savedSnap.exists() && savedSnap.val().companyId) {
-          sel.value = formatCompanyId(savedSnap.val().companyId);
-        }
-
-        document.getElementById("bc-entity-section").style.display = "flex";
-        await saveBCConfig();
-        status.textContent = "✅ Loaded " + companies.length + " companies. Select company & entity, then Get Fields.";
-        status.style.color = "#28a745";
-      } catch (e) {
-        status.textContent = "❌ BC Connection Error: " + e.message;
-        status.style.color = "#dc3545";
-        console.error(e);
-      }
-      hideLoader();
-    };
-
-    window.fetchBCSchema = async function() {
-      const companyId = formatCompanyId(document.getElementById("bc-company-select").value);
-      const entity = document.getElementById("bc-entity-name").value.trim();
-      const status = document.getElementById("bc-status");
-
-      if (!companyId) { status.textContent = "⚠️ Please select a company."; status.style.color = "#dc3545"; return; }
-      if (!entity) { status.textContent = "⚠️ Please enter an entity name (e.g. ItemLedgerEntrys)."; status.style.color = "#dc3545"; return; }
-
-      showLoader();
-      try {
-        const endpoint = buildBCEndpoint(companyId, entity, "$top=1");
-        const data = await bcFetch(endpoint);
-        const records = data.value || [];
-        if (!records.length) throw new Error("No records in " + entity + ". Try another entity or check permissions.");
-
-        bcFirstRecord = records[0];
-        bcAvailableKeys = filterBCFields(bcFirstRecord);
-        populateBCMappingDropdowns(bcAvailableKeys, "map-");
-
-        const preview = document.getElementById("bc-record-preview");
-        preview.style.display = "block";
-        preview.innerHTML = "<b>First record fields (" + bcAvailableKeys.length + "):</b><br>" +
-          bcAvailableKeys.map(k => "<span style='display:inline-block;margin:3px 6px 3px 0;padding:2px 8px;background:#e0e7ff;border-radius:6px;font-size:11px'><b>" + k + ":</b> " + String(bcFirstRecord[k]).substring(0, 40) + "</span>").join("");
-
-        document.getElementById("bc-mapping-section").style.display = "flex";
-        document.getElementById("bc-excel-section").style.display = "flex";
-        await saveBCConfig();
-        status.textContent = "✅ Schema loaded from first record. Map BC fields below, then Direct Sync or use Excel matching.";
-        status.style.color = "#28a745";
-      } catch (e) {
-        status.textContent = "❌ Schema Fetch Error: " + e.message;
-        status.style.color = "#dc3545";
-        console.error(e);
-      }
-      hideLoader();
-    };
-
-    async function fetchAllBCRecords(companyId, entity) {
-      let url = buildBCEndpoint(companyId, entity);
-      const all = [];
-      let guard = 0;
-      while (url && guard < 200) {
-        const data = await bcFetch(url);
-        all.push(...(data.value || []));
-        url = data["@odata.nextLink"] || null;
-        guard++;
-      }
-      return all;
     }
 
     async function importMappedRecords(records, source) {
@@ -660,54 +479,10 @@
       return { added, skipped };
     }
 
-    window.syncBCData = async function() {
-      const companyId = formatCompanyId(document.getElementById("bc-company-select").value);
-      const entity = document.getElementById("bc-entity-name").value.trim();
-      const status = document.getElementById("bc-status");
-      const map = getBCFieldMap("map-");
-
-      if (!companyId) { status.textContent = "⚠️ Select a company first."; status.style.color = "#dc3545"; return; }
-      if (!entity) { status.textContent = "⚠️ Enter entity name."; status.style.color = "#dc3545"; return; }
-      if (!map.itemCode && !map.lot) {
-        status.textContent = "⚠️ Map at least Item Code or Lot before sync.";
-        status.style.color = "#dc3545";
-        return;
-      }
-
-      showLoader();
-      try {
-        status.textContent = "⏳ Direct syncing from BC (no Excel)...";
-        status.style.color = "#888";
-        const allRecords = await fetchAllBCRecords(companyId, entity);
-        const mapped = allRecords.map(rec => mapRecordWithFields(rec, map));
-        const { added, skipped } = await importMappedRecords(mapped, "Business Central API");
-        await saveBCConfig();
-        status.textContent = "✅ Direct BC Sync: " + added + " added, " + skipped + " skipped (of " + allRecords.length + " BC records).";
-        status.style.color = "#28a745";
-      } catch (e) {
-        status.textContent = "❌ Sync Error: " + e.message;
-        status.style.color = "#dc3545";
-        console.error(e);
-      }
-      hideLoader();
-    };
-
-    // ── Excel Upload & BC Key Matching ─────────────────────────────
-    window.loadExcelFile = function() {
-      const file = document.getElementById("excel-upload").files[0];
-      const status = document.getElementById("excel-status");
-      if (!file) { status.textContent = "⚠️ Select an Excel file."; status.style.color = "#dc3545"; return; }
-      readExcelFile(file, status, "bc");
-    };
-
     window.loadExcelFileMaster = function() {
       const file = document.getElementById("excel-upload-master").files[0];
       const status = document.getElementById("excel-status-master");
-      if (!file) { status.textContent = "⚠️ Select an Excel file."; status.style.color = "#dc3545"; return; }
-      readExcelFile(file, status, "master");
-    };
-
-    function readExcelFile(file, statusEl, mode) {
+      if (!file) { status.textContent = "Select an Excel file."; status.style.color = "#dc3545"; return; }
       const reader = new FileReader();
       reader.onload = function(e) {
         try {
@@ -715,98 +490,44 @@
           const sheet = wb.Sheets[wb.SheetNames[0]];
           const json = XLSX.utils.sheet_to_json(sheet, { defval: "" });
           if (!json.length) throw new Error("Excel sheet is empty.");
-
           excelRows = json;
           excelColumns = Object.keys(json[0]);
-
-          if (mode === "master") {
-            populateBCMappingDropdowns(excelColumns, "xls-");
-            document.getElementById("excel-mapping-section").style.display = "block";
-          } else {
-            document.getElementById("bc-excel-key-section").style.display = bcAvailableKeys.length ? "block" : "none";
-            if (bcAvailableKeys.length) populateBCMappingDropdowns(excelColumns, "xlskey-");
-          }
-
-          statusEl.textContent = "✅ Loaded " + json.length + " rows, " + excelColumns.length + " columns.";
-          statusEl.style.color = "#28a745";
+          populateMappingDropdowns(excelColumns, "xls-");
+          document.getElementById("excel-mapping-section").style.display = "block";
+          status.textContent = "Loaded " + json.length + " rows. Map columns below.";
+          status.style.color = "#28a745";
         } catch (err) {
-          statusEl.textContent = "❌ Excel read error: " + err.message;
-          statusEl.style.color = "#dc3545";
+          status.textContent = "Excel read error: " + err.message;
+          status.style.color = "#dc3545";
         }
       };
       reader.readAsArrayBuffer(file);
-    }
+    };
 
     window.importExcelOnlyMaster = async function() {
       const status = document.getElementById("excel-status-master");
-      const map = getBCFieldMap("xls-");
+      const map = getFieldMap("xls-");
       if (!map.itemCode && !map.lot) {
-        status.textContent = "⚠️ Map at least Item Code or Lot column.";
+        status.textContent = "Map at least Item Code or Lot column.";
         status.style.color = "#dc3545";
         return;
       }
-      if (!excelRows.length) { status.textContent = "⚠️ Load Excel first."; status.style.color = "#dc3545"; return; }
-
+      if (!excelRows.length) { status.textContent = "Load Excel first."; status.style.color = "#dc3545"; return; }
       showLoader();
       try {
         const mapped = excelRows.map(row => mapRecordWithFields(row, map));
         const { added, skipped } = await importMappedRecords(mapped, "Excel Upload");
-        status.textContent = "✅ Excel Import: " + added + " added, " + skipped + " skipped.";
+        status.textContent = "Excel Import: " + added + " added, " + skipped + " skipped.";
         status.style.color = "#28a745";
       } catch (e) {
-        status.textContent = "❌ Import error: " + e.message;
+        status.textContent = "Import error: " + e.message;
         status.style.color = "#dc3545";
       }
       hideLoader();
     };
-
-    window.importExcelOnly = window.importExcelOnlyMaster;
-
-    window.syncBCWithExcelKeys = async function() {
-      const status = document.getElementById("bc-status");
-      const companyId = formatCompanyId(document.getElementById("bc-company-select").value);
-      const entity = document.getElementById("bc-entity-name").value.trim();
-      const bcMap = getBCFieldMap("map-");
-      const xlsKeyMap = getBCFieldMap("xlskey-");
-
-      if (!companyId || !entity) { status.textContent = "⚠️ Connect BC, select company & entity first."; status.style.color = "#dc3545"; return; }
-      if (!bcMap.itemCode && !bcMap.lot) { status.textContent = "⚠️ Map BC fields first."; status.style.color = "#dc3545"; return; }
-      if (!excelRows.length) { status.textContent = "⚠️ Upload Excel file first."; status.style.color = "#dc3545"; return; }
-      if (!xlsKeyMap.itemCode && !xlsKeyMap.lot) { status.textContent = "⚠️ Map Excel key columns for matching."; status.style.color = "#dc3545"; return; }
-
-      showLoader();
-      try {
-        status.textContent = "⏳ Fetching BC data and matching with Excel keys...";
-        status.style.color = "#888";
-        const allBC = await fetchAllBCRecords(companyId, entity);
-
-        const excelKeySet = new Set();
-        excelRows.forEach(row => {
-          const k = ((xlsKeyMap.itemCode ? row[xlsKeyMap.itemCode] : "") + "|" + (xlsKeyMap.lot ? row[xlsKeyMap.lot] : "")).toLowerCase();
-          if (k !== "|") excelKeySet.add(k);
-        });
-
-        const matched = allBC
-          .map(rec => mapRecordWithFields(rec, bcMap))
-          .filter(r => {
-            const k = ((r.itemCode || "") + "|" + (r.lot || "")).toLowerCase();
-            return k !== "|" && excelKeySet.has(k);
-          });
-
-        const { added, skipped } = await importMappedRecords(matched, "BC + Excel Key Match");
-        status.textContent = "✅ BC+Excel Match: " + added + " added, " + skipped + " skipped (matched " + matched.length + " of " + allBC.length + " BC records).";
-        status.style.color = "#28a745";
-      } catch (e) {
-        status.textContent = "❌ BC+Excel sync error: " + e.message;
-        status.style.color = "#dc3545";
-        console.error(e);
-      }
-      hideLoader();
-    };
-
     // ── Tabs ──────────────────────────────────────────────────────
     function showTab(name) {
-      ["locations","departments","employees","drums","master","bc","dashboard","settings"].forEach(t => {
+      ["locations","departments","employees","drums","master","dashboard","settings"].forEach(t => {
         const el = document.getElementById("tab-"+t);
         if(el) el.style.display = t===name?"block":"none";
         const btn = document.querySelector(`.tab-btn[data-tab="${t}"]`);
@@ -1303,10 +1024,6 @@
     input[type=checkbox] { width:auto; }
     input[type=file] { padding:6px; }
 
-    .bc-step-box { display:flex; flex-direction:column; gap:10px; margin-bottom:16px; border:1px solid #eee; padding:15px; border-radius:8px; }
-    .dark-theme .bc-step-box { border-color:#444; }
-    .bc-step-box code { font-size:11px; background:#f0f4f8; padding:2px 6px; border-radius:4px; }
-    .dark-theme .bc-step-box code { background:#3a3a4e; }
   </style>
 </head>
 <body>
@@ -1344,7 +1061,6 @@
       <button class="tab-btn" data-tab="employees">👤 Employees</button>
       <button class="tab-btn" data-tab="master">📄 Master Records</button>
       <button class="tab-btn" data-tab="drums">🛢️ Scans</button>
-      <button class="tab-btn" data-tab="bc">🔄 BC Sync</button>
       <button class="tab-btn" data-tab="dashboard">📊 Dashboard</button>
       <button class="tab-btn" data-tab="settings">⚙️ Settings</button>
     </div>
@@ -1381,7 +1097,7 @@
 
     <div id="tab-master" style="display:none">
       <div class="admin-section">
-        <h3>📄 Master Records — PDF Upload</h3>
+        <h3>📄 Master Records — PDF & Excel Import</h3>
         <p style="color:#888;font-size:13px;margin:0 0 14px">
           Upload a PDF with records in <b>Key:Value per line</b> format (same as QR text), separated by blank lines.
           When users scan a QR matching a master record, it gets marked <b>✅ Verified</b>.
@@ -1402,7 +1118,7 @@
         <hr style="border:none;border-top:1px solid #eee;margin:20px 0">
         <h3 style="margin:0 0 10px;font-size:15px">📊 Excel Upload (Column Mapping)</h3>
         <p style="color:#888;font-size:13px;margin:0 0 14px">
-          Upload Excel (.xlsx/.xls/.csv), map columns to app fields, and import to master records — no BC required.
+          Upload Excel (.xlsx/.xls/.csv), map columns to app fields, and import to master records.
         </p>
         <input type="file" id="excel-upload-master" accept=".xlsx,.xls,.csv" style="margin-bottom:8px">
         <button class="add-btn" onclick="loadExcelFileMaster()" style="background:#6f42c1">📂 Load Excel</button>
@@ -1444,82 +1160,6 @@
             <tbody></tbody>
           </table>
         </div>
-      </div>
-    </div>
-
-    <div id="tab-bc" style="display:none">
-      <div class="admin-section">
-        <h3>🔄 Business Central Sync</h3>
-        <p style="color:#888;font-size:13px;margin:0 0 14px">
-          Connect to BC API → select company → select entity → map fields from first record.
-          Use <b>Direct Sync</b> without Excel, or upload Excel to match keys between BC and Excel columns.
-        </p>
-
-        <div class="bc-step-box">
-           <label class="field-label" style="margin-top:0">1. API Connection</label>
-           <small style="color:#888;display:block;margin-bottom:8px">
-             Base: <code>http://host:port/dev3BC270/api/DICAB/DPR/v1.0/</code> — Publisher: DICAB, Group: DPR, Version: v1.0
-           </small>
-           <input type="text" id="bc-url" value="http://divadc1-erap-002:6048/dev3BC270/api/DICAB/DPR/v1.0/" placeholder="BC API Base URL">
-           <div style="display:flex; gap:10px; flex-wrap: wrap; margin-top:8px;">
-              <input type="text" id="bc-user" placeholder="BC Username (Optional)" style="flex:1">
-              <input type="password" id="bc-pass" placeholder="BC Password / Web Access Key" style="flex:1">
-           </div>
-           <button class="add-btn" style="background:#1a73e8; margin-top:10px;" onclick="loadBCCompanies()">📡 Fetch Companies</button>
-        </div>
-
-        <div id="bc-entity-section" style="display:none" class="bc-step-box">
-           <label class="field-label" style="margin-top:0">2. Company & Entity (per company)</label>
-           <select id="bc-company-select" onchange="onBCCompanyChange()"><option value="">-- Select Company --</option></select>
-           <input type="text" id="bc-entity-name" value="ItemLedgerEntrys" placeholder="Entity Endpoint (e.g. ItemLedgerEntrys)" style="margin-top:8px">
-           <small style="color:#888;display:block;margin:8px 0">
-             Example: <code>.../companies(GUID)/ItemLedgerEntrys?$top=1</code>
-           </small>
-           <button class="add-btn" style="background:#28a745;" onclick="fetchBCSchema()">📑 Get First Record & Fields</button>
-        </div>
-
-        <div id="bc-record-preview" style="display:none;margin:12px 0;padding:12px;border:1px dashed #1a73e8;border-radius:8px;font-size:12px;max-height:120px;overflow-y:auto"></div>
-
-        <div id="bc-mapping-section" style="display:none" class="bc-step-box">
-           <label class="field-label" style="margin-top:0">3. Map BC API Fields → App Master Fields</label>
-           <div class="tbl-wrap">
-             <table id="bc-mapping-tbl">
-                <thead><tr><th style="width:50%">App Field</th><th>BC API Field (from first record)</th></tr></thead>
-                <tbody>
-                   <tr><td><strong>Item Code</strong> *</td><td><select id="map-itemCode" style="width:100%"></select></td></tr>
-                   <tr><td><strong>Lot</strong> *</td><td><select id="map-lot" style="width:100%"></select></td></tr>
-                   <tr><td>Quantity</td><td><select id="map-quantity" style="width:100%"></select></td></tr>
-                   <tr><td>Description</td><td><select id="map-desc" style="width:100%"></select></td></tr>
-                   <tr><td>Manual Lot</td><td><select id="map-manualLot" style="width:100%"></select></td></tr>
-                </tbody>
-             </table>
-           </div>
-           <button class="add-btn" style="background:#ff9800; padding:12px; margin-top:12px;" onclick="syncBCData()">🚀 Direct Sync from BC (No Excel)</button>
-        </div>
-
-        <div id="bc-excel-section" style="display:none" class="bc-step-box">
-           <label class="field-label" style="margin-top:0">4. Optional — Excel Key Matching with BC</label>
-           <p style="color:#888;font-size:12px;margin:0 0 10px">Upload Excel to match BC records by key columns (Item Code + Lot).</p>
-           <input type="file" id="excel-upload" accept=".xlsx,.xls,.csv" style="margin-bottom:8px">
-           <button class="add-btn" style="background:#6f42c1;" onclick="loadExcelFile()">📂 Load Excel Columns</button>
-           <div id="excel-status" style="font-size:13px;font-weight:bold;margin:10px 0;min-height:18px"></div>
-
-           <div id="bc-excel-key-section" style="display:none;margin-top:12px">
-             <label class="field-label">Excel Key Columns (for matching with BC)</label>
-             <div class="tbl-wrap">
-               <table>
-                 <thead><tr><th>Key Field</th><th>Excel Column</th></tr></thead>
-                 <tbody>
-                   <tr><td>Item Code Key</td><td><select id="xlskey-itemCode" style="width:100%"></select></td></tr>
-                   <tr><td>Lot Key</td><td><select id="xlskey-lot" style="width:100%"></select></td></tr>
-                 </tbody>
-               </table>
-             </div>
-             <button class="add-btn" style="background:#17a2b8;margin-top:10px;" onclick="syncBCWithExcelKeys()">🔗 Sync BC Records Matching Excel Keys</button>
-           </div>
-        </div>
-        
-        <div id="bc-status" style="margin-top:14px; font-weight:bold; text-align:center; min-height: 20px;"></div>
       </div>
     </div>
 
