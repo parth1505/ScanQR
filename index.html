@@ -252,7 +252,7 @@
     function renderMasterRecords() {
       const tbody = document.querySelector("#master-tbl tbody"); tbody.innerHTML = "";
       if (!masterRecordsList.length) {
-        tbody.innerHTML = '<tr><td colspan="7" style="color:#aaa;padding:15px;text-align:center">No master records. Upload a PDF or import from Excel.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="9" style="color:#aaa;padding:15px;text-align:center">No master records. Upload a PDF or import from Excel.</td></tr>';
         return;
       }
       masterRecordsList.forEach(r => {
@@ -260,8 +260,8 @@
         const tr = document.createElement("tr");
         tr.innerHTML = `
           <td>${r.itemCode||'-'}</td><td>${r.lot||'-'}</td>
-          <td>${r.quantity||'-'}</td><td>${r.desc||'-'}</td>
-          <td>${r.manualLot||'-'}</td>
+          <td>${r.quantity||'-'}</td><td>${r.remQuantity||'-'}</td>
+          <td>${r.desc||'-'}</td><td>${r.manualLot||'-'}</td><td>${r.location||'-'}</td>
           <td><span class="verify-badge ${isVerified?'badge-verified':'badge-unverified'}">${isVerified?'✅ Verified':'⏳ Unverified'}</span></td>
           <td><button class="del-btn" onclick="deleteMasterRecord('${r.key}')">🗑</button></td>`;
         tbody.appendChild(tr);
@@ -337,7 +337,7 @@
         const lines = block.split("\n").map(l => l.trim()).filter(Boolean);
         if (lines.length < 2) return; 
 
-        const r = { itemCode:"", lot:"", quantity:"", remQuantity:"", desc:"", manualLot:"" };
+          const r = { itemCode:"", lot:"", quantity:"", remQuantity:"", desc:"", manualLot:"", location:"" };
         let hasData = false;
 
         lines.forEach(line => {
@@ -353,6 +353,7 @@
           else if (key==="remquantity") { r.remQuantity = val; }
           else if (key==="desc")        { r.desc        = val; }
           else if (key==="manuallot")   { r.manualLot   = val; }
+          else if (key==="location")    { r.location    = val; }
         });
 
         if (hasData && (r.itemCode || r.lot)) {
@@ -455,16 +456,20 @@
       { key: "itemCode", label: "Item Code", required: true },
       { key: "lot", label: "Lot", required: true },
       { key: "quantity", label: "Quantity" },
+      { key: "remQuantity", label: "Rem.Qty" },
       { key: "desc", label: "Description" },
-      { key: "manualLot", label: "Manual Lot" }
+      { key: "manualLot", label: "Manual Lot" },
+      { key: "location", label: "Location" }
     ];
 
     const EXCEL_FIELD_GUESSES = {
       itemCode: ["itemcode", "itemno", "item_no", "no", "itemnumber", "item", "item code"],
       lot: ["lot", "lotno", "lot_no", "lotnumber", "serialno", "serial_no"],
       quantity: ["quantity", "qty", "remquantity", "remainingquantity"],
+      remQuantity: ["remqty", "rem.quantity", "remainingqty", "remainingquantity", "rem qty", "rem_qty"],
       desc: ["desc", "description", "itemdescription", "name"],
-      manualLot: ["manuallot", "manual_lot", "manual lot", "externallotno"]
+      manualLot: ["manuallot", "manual_lot", "manual lot", "externallotno"],
+      location: ["location", "loc", "warehouse", "site"]
     };
 
     function guessExcelField(localKey, keys) {
@@ -498,7 +503,7 @@
     }
 
     function mapRecordWithFields(record, map) {
-      const r = { remQuantity: "" };
+      const r = {};
       LOCAL_FIELDS.forEach(f => {
         const col = map[f.key];
         r[f.key] = col && record[col] != null ? String(record[col]) : "";
@@ -1177,8 +1182,10 @@
                 <tr><td><strong>Item Code</strong> *</td><td><select id="xls-itemCode" style="width:100%"></select></td></tr>
                 <tr><td><strong>Lot</strong> *</td><td><select id="xls-lot" style="width:100%"></select></td></tr>
                 <tr><td>Quantity</td><td><select id="xls-quantity" style="width:100%"></select></td></tr>
+                <tr><td>Rem.Qty</td><td><select id="xls-remQuantity" style="width:100%"></select></td></tr>
                 <tr><td>Description</td><td><select id="xls-desc" style="width:100%"></select></td></tr>
                 <tr><td>Manual Lot</td><td><select id="xls-manualLot" style="width:100%"></select></td></tr>
+                <tr><td>Location</td><td><select id="xls-location" style="width:100%"></select></td></tr>
               </tbody>
             </table>
           </div>
@@ -1198,8 +1205,8 @@
           <table id="master-tbl" style="min-width:700px">
             <thead>
               <tr>
-                <th>Item Code</th><th>Lot</th><th>Quantity</th>
-                <th>Desc</th><th>Manual Lot</th><th>Status</th><th>Action</th>
+                <th>Item Code</th><th>Lot</th><th>Quantity</th><th>Rem.Qty</th>
+                <th>Desc</th><th>Manual Lot</th><th>Location</th><th>Status</th><th>Action</th>
               </tr>
             </thead>
             <tbody></tbody>
