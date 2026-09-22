@@ -41,8 +41,8 @@
 
     let currentSettings = {
       userViewMode: "all", allowDuplicate: false,
-      successSound: true, errorSound: true,
-      vibration: true, theme: "dark", scanDelay: 3
+      successSound: true,
+      theme: "dark", scanDelay: 3
     };
 
     let html5QrCode = null, cameraRunning = false;
@@ -159,14 +159,12 @@
       scanDelaySeconds = currentSettings.scanDelay || 3;
       if(document.getElementById("set-allow-duplicate")) document.getElementById("set-allow-duplicate").checked = currentSettings.allowDuplicate||false;
       if(document.getElementById("set-success-sound")) document.getElementById("set-success-sound").checked = currentSettings.successSound !== false;
-      if(document.getElementById("set-error-sound")) document.getElementById("set-error-sound").checked = currentSettings.errorSound !== false;
-      if(document.getElementById("set-vibration")) document.getElementById("set-vibration").checked = currentSettings.vibration !== false;
       if(document.getElementById("set-theme")) document.getElementById("set-theme").value = currentSettings.theme||"dark";
       if(document.getElementById("set-scan-delay")) document.getElementById("set-scan-delay").value = currentSettings.scanDelay||3;
       if(document.getElementById("set-viewmode")) document.getElementById("set-viewmode").value = currentSettings.userViewMode||"all";
     }
 
-    // ── Sound / Vibrate ───────────────────────────────────────────
+    // ── Sound ────────────────────────────────────────────────────
     function playBeep(freq=800, dur=200) {
       try {
         const ctx = new (window.AudioContext||window.webkitAudioContext)();
@@ -176,7 +174,6 @@
         osc.start(); setTimeout(() => { osc.stop(); ctx.close(); }, dur);
       } catch(e) {}
     }
-    function doVibrate(p=100) { if(currentSettings.vibration && navigator.vibrate) navigator.vibrate(p); }
 
     // ── Admin Login ───────────────────────────────────────────────
     async function doLogin() {
@@ -382,8 +379,6 @@
         userViewMode:    document.getElementById("set-viewmode").value,
         allowDuplicate:  document.getElementById("set-allow-duplicate").checked,
         successSound:    document.getElementById("set-success-sound").checked,
-        errorSound:      document.getElementById("set-error-sound").checked,
-        vibration:       document.getElementById("set-vibration").checked,
         theme:           document.getElementById("set-theme").value,
         scanDelay:       parseInt(document.getElementById("set-scan-delay").value)||3
       };
@@ -731,21 +726,20 @@
 
     function scanSuccess(text) {
       const now=Date.now();
-      if(now-lastScanTime < scanDelaySeconds*1000){playBeep(300,100);doVibrate([50,50,50]);return;}
+      if(now-lastScanTime < scanDelaySeconds*1000){playBeep(300,100);return;}
       lastScanTime=now;
       const fields=parseQR(text), key=dupKey(fields);
 
       if(duplicate.has(key)) {
         const existing = duplicate.get(key);
         if(existing._isScanRecord) {
-          playBeep(400,300); doVibrate([100,50,100]);
+          playBeep(400,300);
           showDuplicatePopup(existing); return;
         }
       }
 
-      pendingFields = fields;
-      playBeep(800,150); doVibrate(100);
-      showConfirmPopup(fields);
+      playBeep(800,150);
+      autoSaveRecord(fields);
     }
 
     // ── Popups ────────────────────────────────────────────────────
@@ -818,6 +812,56 @@
     }
     window.closePopup = function() { document.getElementById("popup-overlay").style.display="none"; pendingFields=null; };
 
+    window.autoSaveRecord = async function(f) {
+      const key=dupKey(f), time=new Date().toISOString();
+
+      const masterMatch = findMasterMatch(f);
+      const isVerified  = !!masterMatch;
+
+      if(masterMatch) {
+        await update(ref(db,"masterRecords/"+masterMatch.key),{ verified:true, verifiedAt:time, verifiedBy:globalUser, verifiedEmpId:globalEmpId });
+        const idx = masterRecordsList.findIndex(r=>r.key===masterMatch.key);
+        if(idx>-1) masterRecordsList[idx].verified=true;
+      }
+
+      const row={
+        No:data.length+1, Quantity:f.Quantity, "Rem.Quantity":f.RemQuantity,
+        "Item Code":f.ItemCode, Desc:f.Desc, Lot:f.Lot, "Manual Lot":f.ManualLot,
+        Location:globalLocation, Department:globalDepartment, "Created User":globalUser,
+        "Emp ID":globalEmpId, Verified:isVerified?"Yes":"No", DateTime:new Date(time).toLocaleString()
+      };
+      data.push(row);
+      duplicate.set(key,{
+        ...f, Location:globalLocation, Department:globalDepartment,
+        CreatedUser:globalUser, EmpId:globalEmpId,
+        verified:isVerified, _isScanRecord:true
+      });
+
+      await push(scansRef,{
+        quantity:f.Quantity, remQuantity:f.RemQuantity, itemCode:f.ItemCode,
+        desc:f.Desc, lot:f.Lot, manualLot:f.ManualLot,
+        location:globalLocation, department:globalDepartment,
+        createdUser:globalUser, empId:globalEmpId,
+        raw:f.Raw, time:time, verified:isVerified
+      });
+
+      addRowToTable(row.No,f,row.DateTime,globalLocation,globalDepartment,globalUser,globalEmpId,isVerified);
+      showSavedToast(f, isVerified);
+    };
+
+    function showSavedToast(f, isVerified) {
+      const toast = document.getElementById("saved-toast");
+      if (!toast) return;
+      document.getElementById("toast-title").textContent = isVerified ? "✅ Saved — Verified" : "🆕 Saved — New Record";
+      toast.className = "saved-toast " + (isVerified ? "toast-verified" : "toast-new");
+      document.getElementById("toast-code").textContent = f.ItemCode || "-";
+      document.getElementById("toast-lot").textContent  = f.Lot || "-";
+      document.getElementById("toast-qty").textContent  = f.Quantity || "-";
+      toast.style.display = "flex";
+      clearTimeout(window._toastTimer);
+      window._toastTimer = setTimeout(() => { toast.style.display = "none"; }, 1800);
+    }
+
     window.saveRecord = async function() {
       showLoader();
       const f=pendingFields, key=dupKey(f), time=new Date().toISOString();
@@ -853,7 +897,7 @@
       });
 
       addRowToTable(row.No,f,row.DateTime,globalLocation,globalDepartment,globalUser,globalEmpId,isVerified);
-      playBeep(800,150); doVibrate(100);
+      playBeep(800,150);
       window.closePopup(); hideLoader();
     };
 
@@ -1074,6 +1118,19 @@
     input[type=checkbox] { width:auto; }
     input[type=file] { padding:6px; }
 
+    /* Auto-save toast */
+    .saved-toast {
+      display:none; position:fixed; left:50%; bottom:24px; transform:translateX(-50%);
+      z-index:10001; min-width:260px; max-width:90vw; border-radius:14px;
+      box-shadow:0 8px 24px rgba(0,0,0,0.3); padding:12px 18px; align-items:center; gap:12px;
+      animation:toastIn 0.2s ease;
+    }
+    @keyframes toastIn { from{transform:translateX(-50%) translateY(20px);opacity:0} to{transform:translateX(-50%) translateY(0);opacity:1} }
+    .toast-verified { background:#1e7e34; color:white; }
+    .toast-new      { background:#e8850c; color:white; }
+    #toast-title { font-weight:bold; font-size:14px; flex-shrink:0; }
+    #toast-details { font-size:12px; opacity:0.95; }
+
   </style>
 </head>
 <body>
@@ -1280,8 +1337,6 @@
             </div>
           </div>
           <div><label>🔊 Success Sound</label> <input type="checkbox" id="set-success-sound" checked> Enable</div>
-          <div><label>🔔 Error Sound</label> <input type="checkbox" id="set-error-sound" checked> Enable</div>
-          <div><label>📳 Vibration</label> <input type="checkbox" id="set-vibration" checked> Enable</div>
           <div><label>🎨 Theme</label>
             <select id="set-theme" style="display:block;margin-top:4px;max-width:200px">
               <option value="light">☀️ Light</option>
@@ -1401,6 +1456,11 @@
 </div>
 
 <input type="checkbox" id="set-allow-duplicate" style="display:none">
+
+<div id="saved-toast" class="saved-toast">
+  <span id="toast-title"></span>
+  <span id="toast-details">Item: <b id="toast-code"></b> | Lot: <b id="toast-lot"></b> | Qty: <b id="toast-qty"></b></span>
+</div>
 
 <script>
   document.addEventListener("DOMContentLoaded", function() {
